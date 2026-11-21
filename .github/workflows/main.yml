@@ -1,0 +1,116 @@
+name: StuDO Android APK Build & Test
+
+on:
+  push:
+    branches:
+      - main
+      - master
+  pull_request:
+    branches:
+      - main
+      - master
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build & Test StuDO
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout source code
+        uses: actions/checkout@v4
+
+      # Android SDK 36 requires Java 21 for compilation and Robolectric sandboxing
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+          cache: 'gradle'
+
+      - name: Set up Gradle 9.3.1
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '9.3.1'
+
+      # Secrets Gradle Plugin requires .env file to exist in workspace
+      - name: Prepare Environment (.env)
+        run: |
+          cp -n .env.example .env || touch .env
+
+      # Restore debug keystore for debugConfig signingConfig in build.gradle.kts
+      - name: Restore Debug Keystore
+        run: |
+          if [ -f "debug.keystore.base64" ] && [ ! -f "debug.keystore" ]; then
+            base64 -d debug.keystore.base64 > debug.keystore
+          elif [ ! -f "debug.keystore" ]; then
+            keytool -genkeypair -v -keystore debug.keystore -alias androiddebugkey \
+              -keyalg RSA -keysize 2048 -validity 10000 -storepass android -keypass android \
+              -dname "CN=Android Debug,O=Android,C=US"
+          fi
+
+      - name: Ensure Executable Gradle Wrapper
+        run: |
+          if [ ! -f "gradlew" ]; then
+            gradle wrapper
+          fi
+          chmod +x gradlew
+
+      - name: Cache Robolectric Android All Instrumented JARs
+        uses: actions/cache@v4
+        with:
+          path: ~/.m2/repository/org/robolectric/android-all-instrumented
+          key: ${{ runner.os }}-robolectric-16-13921718-i7
+          restore-keys: |
+            ${{ runner.os }}-robolectric-
+
+      # Verify, clean stale/corrupt artifacts, and ensure Android 16 instrumented runtime is present
+      - name: Verify or Pre-fetch Robolectric Android 16 Instrumented Runtime
+        run: |
+          ROBO_DIR="$HOME/.m2/repository/org/robolectric/android-all-instrumented/16-robolectric-13921718-i7"
+          ROBO_JAR="$ROBO_DIR/android-all-instrumented-16-robolectric-13921718-i7.jar"
+          EXPECTED_SIZE=213431622
+
+          if [ -f "$ROBO_JAR" ]; then
+            ACTUAL_SIZE=$(stat -c%s "$ROBO_JAR" 2>/dev/null || stat -f%z "$ROBO_JAR" 2>/dev/null || echo 0)
+            if [ "$ACTUAL_SIZE" -lt "$EXPECTED_SIZE" ]; then
+              echo "Cached Robolectric artifact is incomplete ($ACTUAL_SIZE bytes < $EXPECTED_SIZE). Removing..."
+              rm -rf "$ROBO_DIR"
+            else
+              echo "Verified complete Robolectric Android 16 instrumented runtime JAR ($ACTUAL_SIZE bytes)."
+            fi
+          fi
+
+          if [ ! -f "$ROBO_JAR" ]; then
+            echo "Downloading Android 16 instrumented runtime from Maven Central..."
+            mkdir -p "$ROBO_DIR"
+            curl -fSL --retry 3 --retry-delay 5 -o "$ROBO_JAR" \
+              "https://repo1.maven.org/maven2/org/robolectric/android-all-instrumented/16-robolectric-13921718-i7/android-all-instrumented-16-robolectric-13921718-i7.jar"
+            DOWNLOADED_SIZE=$(stat -c%s "$ROBO_JAR" 2>/dev/null || stat -f%z "$ROBO_JAR" 2>/dev/null || echo 0)
+            echo "Successfully downloaded $DOWNLOADED_SIZE bytes."
+          fi
+
+      - name: Run Unit & Robolectric Tests
+        run: ./gradlew :app:testDebugUnitTest --stacktrace
+
+      - name: Build StuDO Debug APK
+        run: ./gradlew :app:assembleDebug --stacktrace
+
+      - name: Upload StuDO APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: StuDO-debug-APK
+          path: app/build/outputs/apk/debug/*.apk
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Upload Test Results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: unit-test-results
+          path: app/build/reports/tests/testDebugUnitTest/
+          retention-days: 7

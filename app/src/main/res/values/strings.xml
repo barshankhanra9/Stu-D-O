@@ -1,0 +1,10 @@
+<resources>
+    <string name="app_name">STU•D•O</string>
+    <string name="camera_permission_required">Camera Permission Required</string>
+    <string name="camera_permission_rationale">STU•D•O requires camera access to capture photographs and provide a professional viewfinder experience.</string>
+    <string name="grant_permission">Grant Access</string>
+    <string name="open_settings">Open App Settings</string>
+    <string name="permission_denied_help">Camera permission is permanently denied. Please enable it in Settings to use STU•D•O.</string>
+    <string name="photo_saved">Saved to Gallery</string>
+    <string name="capture_error">Capture failed</string>
+</resources>
