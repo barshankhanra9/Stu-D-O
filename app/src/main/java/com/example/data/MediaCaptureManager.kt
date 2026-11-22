@@ -72,6 +72,13 @@ class MediaCaptureManager(private val context: Context) {
         retainCleanOriginal: Boolean = false,
         watermarkCacheLimitBytes: Long = 0L,
         onEvictionNotice: ((CacheEvictionResult) -> Unit)? = null,
+        isPortraitMode: Boolean = false,
+        portraitBlurIntensity: Float = 0.62f,
+        portraitFocusX: Float? = null,
+        portraitFocusY: Float? = null,
+        portraitDepthFrameProvider: (() -> com.example.portrait.HardwareDepthFrame?)? = null,
+        portraitSidecarStorage: com.example.portrait.PortraitSidecarStorage? = null,
+        onPortraitProcessed: ((com.example.model.PortraitDepthSource, Int) -> Unit)? = null,
         onCaptureStarted: () -> Unit = {},
         onShutterReady: () -> Unit = {},
         onPhotoSaved: (Uri, Int, Int, Long) -> Unit,
@@ -148,6 +155,13 @@ class MediaCaptureManager(private val context: Context) {
                                 retainCleanOriginal = retainCleanOriginal,
                                 watermarkCacheLimitBytes = watermarkCacheLimitBytes,
                                 onEvictionNotice = onEvictionNotice,
+                                isPortraitMode = isPortraitMode,
+                                portraitBlurIntensity = portraitBlurIntensity,
+                                portraitFocusX = portraitFocusX,
+                                portraitFocusY = portraitFocusY,
+                                portraitDepthFrameProvider = portraitDepthFrameProvider,
+                                portraitSidecarStorage = portraitSidecarStorage,
+                                onPortraitProcessed = onPortraitProcessed,
                                 onComplete = { uri, w, h, bytes ->
                                     mainHandler.post {
                                         onPhotoSaved(uri, w, h, bytes)
@@ -198,6 +212,13 @@ class MediaCaptureManager(private val context: Context) {
         retainCleanOriginal: Boolean = false,
         watermarkCacheLimitBytes: Long = 0L,
         onEvictionNotice: ((CacheEvictionResult) -> Unit)? = null,
+        isPortraitMode: Boolean = false,
+        portraitBlurIntensity: Float = 0.62f,
+        portraitFocusX: Float? = null,
+        portraitFocusY: Float? = null,
+        portraitDepthFrameProvider: (() -> com.example.portrait.HardwareDepthFrame?)? = null,
+        portraitSidecarStorage: com.example.portrait.PortraitSidecarStorage? = null,
+        onPortraitProcessed: ((com.example.model.PortraitDepthSource, Int) -> Unit)? = null,
         onComplete: (Uri, Int, Int, Long) -> Unit,
         onFailure: (ImageCaptureException) -> Unit
     ) {
@@ -280,17 +301,18 @@ class MediaCaptureManager(private val context: Context) {
             fullScreenAspectRatio = fullScreenAspectRatio
         )
 
-        val needsPixelProcessing = hasFilter || shouldMirror || needsCrop || hasWatermark
+        val needsPixelProcessing = hasFilter || shouldMirror || needsCrop || hasWatermark || isPortraitMode
         val shouldRetainCleanOriginal = hasWatermark && retainCleanOriginal && privateOriginalStorage != null
         var retainedEntry: PrivateOriginalEntry? = null
+        var savedSidecarEntry: com.example.portrait.PortraitSidecarEntry? = null
 
         if (needsPixelProcessing) {
             var tempOutFile: java.io.File? = null
             var originalBitmap: Bitmap? = null
             var currentBitmap: Bitmap? = null
             try {
-                // Preserve raw untouched JPEG stream bytes when no crop/filter is applied
-                if (shouldRetainCleanOriginal && !hasFilter && !needsCrop) {
+                // Preserve raw untouched JPEG stream bytes when no crop/filter/portrait is applied
+                if (shouldRetainCleanOriginal && !hasFilter && !needsCrop && !isPortraitMode) {
                     val baseMeta = photoMetadata ?: com.example.util.CameraMetadataUtil.fromUri(context, savedUri)
                     val metaWithLens = com.example.util.CameraMetadataUtil.withActiveFocalLengthIfMissing(baseMeta, activeFocalLengthMm)
                     retainedEntry = privateOriginalStorage?.saveOriginalFromUri(
@@ -360,7 +382,59 @@ class MediaCaptureManager(private val context: Context) {
                             )
                         }
 
-                        // Retain clean pre-watermark bitmap if crop/filter altered the raw image
+                        // Step 2.5: Portrait Mode segmentation, non-destructive sidecar preservation & depth-graded optical bokeh
+                        if (isPortraitMode) {
+                            val preBokehBmp = currentBitmap!!
+                            val hwDepth = try {
+                                portraitDepthFrameProvider?.invoke()
+                            } catch (_: Throwable) {
+                                null
+                            }
+                            val segmentation = com.example.portrait.PortraitSegmentationEngine.segmentBitmap(
+                                uprightBitmap = preBokehBmp,
+                                isPreviewStream = false,
+                                focusX = portraitFocusX,
+                                focusY = portraitFocusY,
+                                hardwareDepthFrame = hwDepth
+                            )
+                            val rawMeta = photoMetadata ?: com.example.util.CameraMetadataUtil.fromUri(
+                                context, savedUri, preBokehBmp.width, preBokehBmp.height
+                            )
+                            val metaWithLens = com.example.util.CameraMetadataUtil.withActiveFocalLengthIfMissing(
+                                rawMeta, activeFocalLengthMm
+                            )
+                            val wmCfgForSidecar = watermarkConfig ?: com.example.model.WatermarkConfig(isEnabled = false)
+                            savedSidecarEntry = portraitSidecarStorage?.savePortraitSidecar(
+                                cleanUprightBitmap = preBokehBmp,
+                                segmentation = segmentation,
+                                blurIntensity = portraitBlurIntensity,
+                                focusX = portraitFocusX ?: 0.5f,
+                                focusY = portraitFocusY ?: 0.45f,
+                                exifAttributes = exifAttributes,
+                                metadata = metaWithLens,
+                                watermarkConfig = wmCfgForSidecar,
+                                isSaveLocation = isSaveLocation
+                            )
+
+                            val bokehBmp = com.example.portrait.PortraitBokehRenderer.renderFullResolutionPortrait(
+                                originalUpright = preBokehBmp,
+                                segmentation = segmentation,
+                                options = com.example.portrait.BokehRenderOptions(
+                                    blurIntensity = portraitBlurIntensity,
+                                    focusX = portraitFocusX,
+                                    focusY = portraitFocusY
+                                )
+                            )
+                            if (bokehBmp !== preBokehBmp && preBokehBmp != original) {
+                                preBokehBmp.recycle()
+                            }
+                            currentBitmap = bokehBmp
+                            onPortraitProcessed?.let { cb ->
+                                mainHandler.post { cb(segmentation.source, segmentation.subjectCount) }
+                            }
+                        }
+
+                        // Retain clean pre-watermark bitmap if crop/filter/portrait altered the raw image
                         if (shouldRetainCleanOriginal && retainedEntry == null) {
                             val active = currentBitmap!!
                             val rawMeta = photoMetadata ?: com.example.util.CameraMetadataUtil.fromUri(context, savedUri, active.width, active.height)
@@ -497,6 +571,10 @@ class MediaCaptureManager(private val context: Context) {
             if (eviction.evictedCount > 0) {
                 onEvictionNotice?.let { cb -> mainHandler.post { cb(eviction) } }
             }
+        }
+
+        if (savedSidecarEntry != null && portraitSidecarStorage != null) {
+            portraitSidecarStorage.linkGalleryUri(savedUri, savedSidecarEntry!!.sidecarId)
         }
 
         onComplete(savedUri, savedW, savedH, savedBytes)

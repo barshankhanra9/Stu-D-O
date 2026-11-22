@@ -74,6 +74,7 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
     private val capabilityDetector = com.example.data.CameraCapabilityDetector(appContext)
     val mediaCaptureManager = MediaCaptureManager(appContext)
     val privateOriginalStorage = com.example.data.PrivateOriginalStorageManager(appContext)
+    val portraitSidecarStorage = com.example.portrait.PortraitSidecarStorage(appContext)
     val recycleBinManager = com.example.data.RecycleBinManager(appContext)
     private val ultraResCaptureManager = com.example.data.UltraResCaptureManager(appContext)
     private val oemRegistry = com.example.oem.OemAdapterRegistry()
@@ -127,6 +128,14 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
             9f / 20f
         }
 
+        val activityManager = appContext.getSystemService(Context.ACTIVITY_SERVICE) as? android.app.ActivityManager
+        val isLowRam = try { activityManager?.isLowRamDevice == true } catch (_: Throwable) { false }
+        val initialPortraitTier = if (isLowRam) {
+            com.example.model.PortraitQualityTier.EFFICIENT
+        } else {
+            com.example.model.PortraitQualityTier.BALANCED
+        }
+
         // Restore all persistent user settings from disk
         _uiState.update { current ->
             current.copy(
@@ -163,7 +172,9 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
                 isSaveLocationEnabled = preferencesRepo.isSaveLocationEnabled(),
                 oemEnhancementMode = savedOemMode,
                 activeOemAdapterName = activeOemAdapter.adapterName,
-                oemEnhancementSummary = "${activeOemAdapter.adapterName} (${if (savedOemMode == com.example.model.OemEnhancementMode.AUTOMATIC) "Auto" else "Universal"})"
+                oemEnhancementSummary = "${activeOemAdapter.adapterName} (${if (savedOemMode == com.example.model.OemEnhancementMode.AUTOMATIC) "Auto" else "Universal"})",
+                portraitBlurIntensity = preferencesRepo.getPortraitBlurIntensity(),
+                portraitQualityTier = initialPortraitTier
             )
         }
         refreshLensCapabilities()
@@ -370,6 +381,13 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
                     activeCamera != null &&
                     activeVideoCapture == null
 
+                val isHwDepthSupported = cap.isDepthOutputSupported || cap.depth16Sizes.isNotEmpty()
+                val effectiveDepthSource = if (isHwDepthSupported) {
+                    com.example.model.PortraitDepthSource.HYBRID
+                } else {
+                    com.example.model.PortraitDepthSource.AI_SEGMENTATION
+                }
+
                 _uiState.update {
                     it.copy(
                         isUhrSupportedOnCurrentLens = cap.isUltraHighResolutionSupported,
@@ -395,7 +413,9 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
                         videoQuality = effectiveQuality,
                         videoFps = effectiveFps,
                         activeFocalLengthMm = effectiveFocalMm,
-                        activeFocalLengthText = effectiveFocalText
+                        activeFocalLengthText = effectiveFocalText,
+                        isPortraitHardwareDepthSupported = isHwDepthSupported,
+                        portraitDepthSource = effectiveDepthSource
                     )
                 }
             } else {
@@ -413,7 +433,9 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
                         activeResolutionOption = null,
                         targetCaptureSize = null,
                         activeFocalLengthMm = effectiveFocalMm,
-                        activeFocalLengthText = effectiveFocalText
+                        activeFocalLengthText = effectiveFocalText,
+                        isPortraitHardwareDepthSupported = false,
+                        portraitDepthSource = com.example.model.PortraitDepthSource.AI_SEGMENTATION
                     )
                 }
             }
@@ -517,16 +539,19 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
             val videoSupportedForLens = cap?.isVideoRecordingSupported ?: true
 
             val updatedState = _uiState.updateAndGet {
+                val switchingVideo = (it.cameraMode == CameraMode.VIDEO) != (mode == CameraMode.VIDEO)
                 it.copy(
                     cameraMode = mode,
-                    isCameraReady = false,
+                    isCameraReady = if (switchingVideo) false else it.isCameraReady,
                     activeCameraPanel = com.example.model.ActiveCameraPanel.NONE,
                     isFilterSelectorOpen = false,
                     isQuickSettingsOpen = false,
                     isVideoSettingsPanelOpen = false,
                     activeProTab = com.example.model.ProControlTab.NONE,
                     showExposureSlider = false,
-                    isVideoRecordingSupported = if (mode == CameraMode.VIDEO) videoSupportedForLens else it.isVideoRecordingSupported
+                    isVideoRecordingSupported = if (mode == CameraMode.VIDEO) videoSupportedForLens else it.isVideoRecordingSupported,
+                    isPortraitSubjectDetected = if (mode == CameraMode.PORTRAIT) it.isPortraitSubjectDetected else false,
+                    portraitSubjectCount = if (mode == CameraMode.PORTRAIT) it.portraitSubjectCount else 0
                 )
             }
             syncImageCaptureFlashMode(state = updatedState)
@@ -535,7 +560,7 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
             }
             if (mode == CameraMode.PRO) {
                 applyProSettingsToPreview()
-            } else if (mode == CameraMode.PHOTO) {
+            } else {
                 clearProSettingsFromPreview()
             }
         }
@@ -727,7 +752,9 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
     fun triggerTapToFocus(
         pointFactory: MeteringPointFactory,
         screenX: Float,
-        screenY: Float
+        screenY: Float,
+        normalizedX: Float? = null,
+        normalizedY: Float? = null
     ) {
         val point = pointFactory.createPoint(screenX, screenY)
         val action = FocusMeteringAction.Builder(point, FocusMeteringAction.FLAG_AF or FocusMeteringAction.FLAG_AE)
@@ -737,9 +764,15 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
         activeCameraControl?.startFocusAndMetering(action)
 
         _uiState.update {
+            val normFocus = if (normalizedX != null && normalizedY != null) {
+                Offset(normalizedX.coerceIn(0f, 1f), normalizedY.coerceIn(0f, 1f))
+            } else {
+                it.portraitFocusPointNormalized
+            }
             it.copy(
                 focusPoint = Offset(screenX, screenY),
-                showFocusRing = true
+                showFocusRing = true,
+                portraitFocusPointNormalized = normFocus
             )
         }
 
@@ -831,18 +864,18 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
     private fun dispatchPhotoCapture(mediaCaptureManager: MediaCaptureManager) {
         if (_uiState.value.isCapturing || _uiState.value.isRecordingVideo) return
 
+        // Portrait Mode always routes through CameraX still capture + Portrait bokeh pipeline
+        if (_uiState.value.cameraMode == CameraMode.PORTRAIT) {
+            capturePhoto(mediaCaptureManager)
+            return
+        }
+
         val isUhrRequested = _uiState.value.photoResolution == PhotoResolution.ULTRA_RES
         val isRawRequested = _uiState.value.rawCaptureMode != com.example.model.RawCaptureMode.OFF
         val isProMode = _uiState.value.cameraMode == CameraMode.PRO
         val isProManual = isProMode && !_uiState.value.proSettings.isAuto
         val isFront = (_uiState.value.lensFacing == CameraSelector.LENS_FACING_FRONT)
         val cap = capabilityDetector.getCapabilityForLens(isFront)
-
-        val activeOpt = _uiState.value.activeResolutionOption
-        val isStallStreamTarget = activeOpt?.isStallStream == true
-        val isConfiguredBelowTarget = _uiState.value.actualConfiguredResolution?.let { conf ->
-            activeOpt?.size != null && (conf.width < activeOpt.size.width || conf.height < activeOpt.size.height)
-        } ?: false
 
         if (cap != null) {
             if ((isUhrRequested && _uiState.value.isUhrSupportedOnCurrentLens) ||
@@ -1065,6 +1098,23 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
         // Ensure ImageCapture carries latest hardware or Screen Flash mode before capture begins
         syncImageCaptureFlashMode(imageCapture)
 
+        val isPortraitMode = _uiState.value.cameraMode == CameraMode.PORTRAIT
+        val portraitBlur = _uiState.value.portraitBlurIntensity
+        val portraitFocus = _uiState.value.portraitFocusPointNormalized
+        val portraitCap = if (isPortraitMode) capabilityDetector.getCapabilityForLens(isFront) else null
+        val hwDepthProvider: (() -> com.example.portrait.HardwareDepthFrame?)? =
+            if (isPortraitMode && portraitCap != null && portraitCap.isDepthOutputSupported && portraitCap.depth16Sizes.isNotEmpty()) {
+                {
+                    captureHardwareDepthWithTemporaryUnbind(
+                        cap = portraitCap,
+                        targetRotation = currentTargetRotation,
+                        mirrorHorizontal = isFront && mirrorSelfie
+                    )
+                }
+            } else {
+                null
+            }
+
         var captureStartedCounted = false
 
         mediaCaptureManager.capturePhoto(
@@ -1081,6 +1131,22 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
             retainCleanOriginal = _uiState.value.isPostCaptureWatermarkEditingEnabled,
             watermarkCacheLimitBytes = _uiState.value.watermarkCacheLimit.limitBytes,
             onEvictionNotice = { eviction -> handlePrivateStorageEvictionNotice(eviction) },
+            isPortraitMode = isPortraitMode,
+            portraitBlurIntensity = portraitBlur,
+            portraitFocusX = portraitFocus?.x,
+            portraitFocusY = portraitFocus?.y,
+            portraitDepthFrameProvider = hwDepthProvider,
+            portraitSidecarStorage = if (isPortraitMode) portraitSidecarStorage else null,
+            onPortraitProcessed = { source, subjectCount ->
+                _uiState.update {
+                    it.copy(
+                        portraitDepthSource = source,
+                        portraitSubjectCount = subjectCount,
+                        isPortraitSubjectDetected = subjectCount > 0,
+                        portraitSidecarRevision = it.portraitSidecarRevision + 1L
+                    )
+                }
+            },
             onCaptureStarted = {
                 captureStartedCounted = true
                 _uiState.update {
@@ -1117,7 +1183,7 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
                         targetDimensions = targetSize,
                         actualDimensions = actualSize,
                         fileSizeBytes = bytes,
-                        captureEngine = "CameraX ImageCapture",
+                        captureEngine = if (isPortraitMode) "CameraX Portrait" else "CameraX ImageCapture",
                         isFallback = isFallback
                     )
                 }
@@ -1128,7 +1194,8 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
                         isCapturing = false,
                         lastCapturedUri = uri,
                         inFlightCapturesCount = remaining,
-                        isSavingMedia = remaining > 0
+                        isSavingMedia = remaining > 0,
+                        portraitSidecarRevision = if (isPortraitMode) cur.portraitSidecarRevision + 1L else cur.portraitSidecarRevision
                     )
                 }
                 refreshPrivateStorageStats()
@@ -1147,6 +1214,50 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
                 }
             }
         )
+    }
+
+    private fun captureHardwareDepthWithTemporaryUnbind(
+        cap: com.example.data.CameraSensorCapability,
+        targetRotation: Int,
+        mirrorHorizontal: Boolean
+    ): com.example.portrait.HardwareDepthFrame? {
+        val provider = activeCameraProvider ?: return null
+        val mainHandler = android.os.Handler(android.os.Looper.getMainLooper())
+        val unbindLatch = java.util.concurrent.CountDownLatch(1)
+        mainHandler.post {
+            try {
+                provider.unbindAll()
+            } catch (_: Throwable) {
+            } finally {
+                unbindLatch.countDown()
+            }
+        }
+        try {
+            unbindLatch.await(400L, java.util.concurrent.TimeUnit.MILLISECONDS)
+            Thread.sleep(160L)
+        } catch (_: Throwable) {}
+
+        val rotationDeg = when (targetRotation) {
+            android.view.Surface.ROTATION_90 -> 270
+            android.view.Surface.ROTATION_180 -> 180
+            android.view.Surface.ROTATION_270 -> 90
+            else -> 0
+        }
+        val frame = try {
+            com.example.portrait.HardwareDepthProcessor.captureHardwareDepthSnapshot(
+                context = appContext,
+                capability = cap,
+                targetRotationDegrees = rotationDeg,
+                mirrorHorizontal = mirrorHorizontal,
+                timeoutMs = 950L
+            )
+        } catch (_: Throwable) {
+            null
+        }
+        mainHandler.post {
+            _uiState.update { it.copy(viewfinderRebindKey = it.viewfinderRebindKey + 1L) }
+        }
+        return frame
     }
 
     private fun scheduleGalleryRefresh(
@@ -1523,6 +1634,7 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
             when (val result = recycleBinManager.moveToBin(mediaCaptureManager, item)) {
                 is com.example.data.RecycleResult.MovedToBin -> {
                     privateOriginalStorage.unlinkGalleryUri(item.uri)
+                    portraitSidecarStorage.unlinkGalleryUri(item.uri)
                     val updatedItems = mediaCaptureManager.getAllMedia()
                     val updatedBin = recycleBinManager.getBinItems()
                     val nextIndex = if (updatedItems.isEmpty()) {
@@ -2821,6 +2933,169 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
                 isCapturing = false,
                 userMessage = message
             )
+        }
+    }
+
+    // ============================================================================================
+    // Dedicated Portrait Mode Controls & Non-Destructive Post-Capture Blur Editor
+    // ============================================================================================
+
+    fun setPortraitFocusPoint(normalizedX: Float, normalizedY: Float) {
+        val norm = Offset(normalizedX.coerceIn(0f, 1f), normalizedY.coerceIn(0f, 1f))
+        _uiState.update { it.copy(portraitFocusPointNormalized = norm) }
+    }
+
+    fun setPortraitBlurIntensity(intensity: Float) {
+        val clamped = intensity.coerceIn(0f, 1f)
+        preferencesRepo.savePortraitBlurIntensity(clamped)
+        _uiState.update { it.copy(portraitBlurIntensity = clamped) }
+    }
+
+    fun onPortraitPreviewUpdate(
+        hasSubject: Boolean,
+        subjectCount: Int,
+        depthSource: com.example.model.PortraitDepthSource,
+        qualityTier: com.example.model.PortraitQualityTier
+    ) {
+        _uiState.update { cur ->
+            val effectiveSource = if (cur.isPortraitHardwareDepthSupported &&
+                depthSource == com.example.model.PortraitDepthSource.AI_SEGMENTATION
+            ) {
+                com.example.model.PortraitDepthSource.HYBRID
+            } else {
+                depthSource
+            }
+            if (cur.isPortraitSubjectDetected == hasSubject &&
+                cur.portraitSubjectCount == subjectCount &&
+                cur.portraitDepthSource == effectiveSource &&
+                cur.portraitQualityTier == qualityTier
+            ) {
+                cur
+            } else {
+                cur.copy(
+                    isPortraitSubjectDetected = hasSubject,
+                    portraitSubjectCount = subjectCount,
+                    portraitDepthSource = effectiveSource,
+                    portraitQualityTier = qualityTier
+                )
+            }
+        }
+    }
+
+    fun hasPortraitSidecar(item: MediaItem): Boolean {
+        return !item.isVideo && portraitSidecarStorage.hasPortraitSidecar(item.uri)
+    }
+
+    fun openPortraitEditor(item: MediaItem) {
+        if (item.isVideo) return
+        val target = portraitSidecarStorage.resolveForGalleryUri(item.uri)
+        if (target == null) {
+            _uiState.update { it.copy(userMessage = "Portrait depth data is unavailable for this photo") }
+            return
+        }
+        dismissScreenFlash()
+        _uiState.update {
+            it.copy(
+                postCapturePortraitTarget = target,
+                isPortraitEditorOpen = true,
+                isPortraitEditorSaving = false
+            )
+        }
+    }
+
+    fun closePortraitEditor() {
+        _uiState.update {
+            it.copy(
+                isPortraitEditorOpen = false,
+                postCapturePortraitTarget = null,
+                isPortraitEditorSaving = false
+            )
+        }
+    }
+
+    fun savePortraitUpdateExisting(blurIntensity: Float, focusX: Float, focusY: Float) {
+        val target = _uiState.value.postCapturePortraitTarget ?: return
+        if (_uiState.value.isPortraitEditorSaving) return
+        _uiState.update { it.copy(isPortraitEditorSaving = true) }
+        viewModelScope.launch {
+            val res = portraitSidecarStorage.reRenderAndUpdateExisting(
+                target = target,
+                newBlurIntensity = blurIntensity,
+                newFocusX = focusX,
+                newFocusY = focusY,
+                isSaveLocation = _uiState.value.isSaveLocationEnabled
+            )
+            val refreshed = withContext(Dispatchers.IO) { mediaCaptureManager.getAllMedia() }
+            withContext(Dispatchers.Main) {
+                when (res) {
+                    is com.example.data.PostCaptureExportResult.Success -> {
+                        _uiState.update { cur ->
+                            cur.copy(
+                                isPortraitEditorSaving = false,
+                                isPortraitEditorOpen = false,
+                                postCapturePortraitTarget = null,
+                                galleryItems = refreshed,
+                                galleryMediaRevision = cur.galleryMediaRevision + 1L,
+                                portraitSidecarRevision = cur.portraitSidecarRevision + 1L,
+                                userMessage = "Portrait blur updated (${com.example.model.PortraitApertureFormatter.formatFStop(blurIntensity)})"
+                            )
+                        }
+                    }
+                    is com.example.data.PostCaptureExportResult.Failure -> {
+                        _uiState.update { cur ->
+                            cur.copy(
+                                isPortraitEditorSaving = false,
+                                userMessage = res.reason
+                            )
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    fun savePortraitSaveCopy(blurIntensity: Float, focusX: Float, focusY: Float) {
+        val target = _uiState.value.postCapturePortraitTarget ?: return
+        if (_uiState.value.isPortraitEditorSaving) return
+        _uiState.update { it.copy(isPortraitEditorSaving = true) }
+        viewModelScope.launch {
+            val res = portraitSidecarStorage.reRenderAndSaveCopy(
+                target = target,
+                newBlurIntensity = blurIntensity,
+                newFocusX = focusX,
+                newFocusY = focusY,
+                isSaveLocation = _uiState.value.isSaveLocationEnabled
+            )
+            val refreshed = withContext(Dispatchers.IO) { mediaCaptureManager.getAllMedia() }
+            withContext(Dispatchers.Main) {
+                when (res) {
+                    is com.example.data.PostCaptureExportResult.Success -> {
+                        val copyIdx = refreshed.indexOfFirst { it.uri == res.galleryUri }
+                            .takeIf { it >= 0 } ?: 0
+                        _uiState.update { cur ->
+                            cur.copy(
+                                isPortraitEditorSaving = false,
+                                isPortraitEditorOpen = false,
+                                postCapturePortraitTarget = null,
+                                galleryItems = refreshed,
+                                currentGalleryIndex = if (cur.isGalleryOpen) copyIdx else cur.currentGalleryIndex,
+                                lastCapturedUri = res.galleryUri,
+                                galleryMediaRevision = cur.galleryMediaRevision + 1L,
+                                portraitSidecarRevision = cur.portraitSidecarRevision + 1L,
+                                userMessage = "Saved Portrait copy (${com.example.model.PortraitApertureFormatter.formatFStop(blurIntensity)})"
+                            )
+                        }
+                    }
+                    is com.example.data.PostCaptureExportResult.Failure -> {
+                        _uiState.update { cur ->
+                            cur.copy(
+                                isPortraitEditorSaving = false,
+                                userMessage = res.reason
+                            )
+                        }
+                    }
+                }
+            }
         }
     }
 

@@ -131,7 +131,7 @@ fun CameraBottomBar(
 
             Spacer(modifier = Modifier.height(10.dp))
 
-            // PHOTO / PRO / VIDEO Mode Selector with Elastic Glass Droplet Physics
+            // PHOTO / PORTRAIT / PRO / VIDEO Mode Selector with Elastic Glass Droplet Physics
             AnimatedVisibility(
                 visible = !uiState.isRecordingVideo,
                 enter = fadeIn(tween(200)) + expandVertically(),
@@ -576,13 +576,22 @@ private fun ElasticModeSelector(
     )
 
     val isPro = selectedMode == CameraMode.PRO
+    val isPortrait = selectedMode == CameraMode.PORTRAIT
     val beadTintTop by animateColorAsState(
-        targetValue = if (isPro) StuDOAmber.copy(alpha = 0.28f) else Color.White.copy(alpha = 0.22f),
+        targetValue = when {
+            isPro -> StuDOAmber.copy(alpha = 0.28f)
+            isPortrait -> GlassCoolBlueSpecular.copy(alpha = 0.28f)
+            else -> Color.White.copy(alpha = 0.22f)
+        },
         animationSpec = tween(200),
         label = "mode_bead_top"
     )
     val beadTintBottom by animateColorAsState(
-        targetValue = if (isPro) Color(0xFF3A2206).copy(alpha = 0.74f) else GlassObsidianBottom.copy(alpha = 0.82f),
+        targetValue = when {
+            isPro -> Color(0xFF3A2206).copy(alpha = 0.74f)
+            isPortrait -> Color(0xFF102438).copy(alpha = 0.78f)
+            else -> GlassObsidianBottom.copy(alpha = 0.82f)
+        },
         animationSpec = tween(200),
         label = "mode_bead_bottom"
     )
@@ -656,7 +665,7 @@ private fun ElasticModeSelector(
                             topColor = beadTintTop,
                             bottomColor = beadTintBottom,
                             borderWidth = 0.8.dp,
-                            coolHighlightAlpha = if (isPro) 0.36f else 0.44f,
+                            coolHighlightAlpha = if (isPro) 0.36f else if (isPortrait) 0.56f else 0.44f,
                             warmHighlightAlpha = if (isPro) 0.36f else 0.28f,
                             specularSheenAlpha = 0.20f,
                             internalShadowAlpha = 0.26f
@@ -666,19 +675,21 @@ private fun ElasticModeSelector(
         }
 
         Row(
-            horizontalArrangement = Arrangement.spacedBy(4.dp),
+            horizontalArrangement = Arrangement.spacedBy(2.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
             CameraMode.values().forEach { mode ->
                 val isSelected = selectedMode == mode
                 val tag = when (mode) {
                     CameraMode.PHOTO -> "mode_photo_button"
+                    CameraMode.PORTRAIT -> "mode_portrait_button"
                     CameraMode.PRO -> "mode_pro_button"
                     CameraMode.VIDEO -> "mode_video_button"
                 }
                 val textColor by animateColorAsState(
                     targetValue = when {
                         isSelected && mode == CameraMode.PRO -> StuDOAmber
+                        isSelected && mode == CameraMode.PORTRAIT -> GlassCoolBlueSpecular
                         isSelected -> StuDOWhite.copy(alpha = 0.98f)
                         else -> StuDOSilverMuted.copy(alpha = 0.78f)
                     },
@@ -695,7 +706,7 @@ private fun ElasticModeSelector(
                         .clickable(enabled = enabled) {
                             onModeSelected(mode)
                         }
-                        .padding(horizontal = 14.dp, vertical = 5.dp)
+                        .padding(horizontal = 10.dp, vertical = 5.dp)
                         .testTag(tag),
                     contentAlignment = Alignment.Center
                 ) {
@@ -703,8 +714,10 @@ private fun ElasticModeSelector(
                         text = mode.displayName,
                         color = textColor,
                         fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium,
-                        fontSize = 11.sp,
-                        letterSpacing = 1.2.sp
+                        fontSize = 10.5.sp,
+                        letterSpacing = 0.9.sp,
+                        maxLines = 1,
+                        softWrap = false
                     )
                 }
             }

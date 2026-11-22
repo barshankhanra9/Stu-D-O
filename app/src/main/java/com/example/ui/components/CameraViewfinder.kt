@@ -91,16 +91,21 @@ import com.example.model.CameraUiState
 import com.example.model.CaptureAspectRatio
 import com.example.model.CapturePriority
 import com.example.model.GridOption
+import com.example.model.PortraitDepthSource
+import com.example.model.PortraitQualityTier
 import com.example.model.ScreenFlashMode
 import com.example.model.VideoCodecOption
 import com.example.model.VideoFpsOption
 import com.example.model.VideoQualityOption
+import com.example.portrait.PortraitBokehRenderer
+import com.example.portrait.PortraitSegmentationEngine
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withTimeoutOrNull
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicReference
 import kotlin.coroutines.resume
 import kotlin.coroutines.resumeWithException
 
@@ -138,6 +143,12 @@ private class ViewfinderSessionHolder {
     val isAnalysisPaused = AtomicBoolean(false)
     val isHistogramActive = AtomicBoolean(false)
     val isBackdropActive = AtomicBoolean(false)
+    val isPortraitActive = AtomicBoolean(false)
+    val portraitBlurIntensity = AtomicReference(0.62f)
+    val portraitFocusX = AtomicReference<Float?>(null)
+    val portraitFocusY = AtomicReference<Float?>(null)
+    val portraitQualityTier = AtomicReference(PortraitQualityTier.BALANCED)
+    val portraitFilter = AtomicReference(CameraFilter.NATURAL)
     val isFrontCamera = AtomicBoolean(false)
     val isGestureBlocked = AtomicBoolean(false)
     val isScreenFlashOverlayActive = AtomicBoolean(false)
@@ -302,6 +313,8 @@ fun CameraViewfinder(
     onLowLightChanged: (Boolean) -> Unit = {},
     onScreenFlashApplyRequested: (Long, ImageCapture.ScreenFlashListener) -> Unit = { _, listener -> listener.onCompleted() },
     onScreenFlashClearRequested: () -> Unit = {},
+    onPortraitStatusUpdate: ((Boolean, Int, PortraitDepthSource, PortraitQualityTier) -> Unit)? = null,
+    onNormalizedFocusPoint: ((Float, Float) -> Unit)? = null,
     orientationState: kotlinx.coroutines.flow.StateFlow<com.example.model.DeviceOrientationState>? = null,
     modifier: Modifier = Modifier
 ) {
@@ -324,10 +337,13 @@ fun CameraViewfinder(
     val latestOnLowLightChanged by rememberUpdatedState(onLowLightChanged)
     val latestOnScreenFlashApplyRequested by rememberUpdatedState(onScreenFlashApplyRequested)
     val latestOnScreenFlashClearRequested by rememberUpdatedState(onScreenFlashClearRequested)
+    val latestOnPortraitStatusUpdate by rememberUpdatedState(onPortraitStatusUpdate)
+    val latestOnNormalizedFocusPoint by rememberUpdatedState(onNormalizedFocusPoint)
 
     val isOverlayBlocking = uiState.isSettingsOpen ||
         uiState.isWatermarkStudioOpen ||
         uiState.isPhotoEditorOpen ||
+        uiState.isPortraitEditorOpen ||
         uiState.isRecycleBinOpen ||
         (uiState.isGalleryOpen && uiState.galleryItems.isNotEmpty())
     val shouldPausePreview = isOverlayBlocking && !uiState.isRecordingVideo
@@ -337,11 +353,16 @@ fun CameraViewfinder(
         (context.getSystemService(Context.ACTIVITY_SERVICE) as? ActivityManager)?.isLowRamDevice == true
     }
     var blurredBackdropBitmap by remember { mutableStateOf<Bitmap?>(null) }
+    var portraitOverlayBitmap by remember { mutableStateOf<Bitmap?>(null) }
     val isFramedBackdropWanted = !isVideoMode &&
         uiState.aspectRatio != CaptureAspectRatio.RATIO_FULL &&
         !shouldPausePreview &&
         uiState.isStreaming &&
         !isLowRamDevice
+    val isPortraitWanted = !isVideoMode &&
+        uiState.cameraMode == CameraMode.PORTRAIT &&
+        !shouldPausePreview &&
+        uiState.isStreaming
 
     LaunchedEffect(isFramedBackdropWanted) {
         if (!isFramedBackdropWanted) {
@@ -349,10 +370,26 @@ fun CameraViewfinder(
         }
     }
 
+    LaunchedEffect(isPortraitWanted) {
+        if (!isPortraitWanted) {
+            portraitOverlayBitmap = null
+        }
+    }
+
     SideEffect {
-        session.isAnalysisPaused.set(shouldPausePreview || (!uiState.isHistogramEnabled && !isFramedBackdropWanted) || isVideoMode)
+        session.isAnalysisPaused.set(
+            shouldPausePreview ||
+                (!uiState.isHistogramEnabled && !isFramedBackdropWanted && !isPortraitWanted) ||
+                isVideoMode
+        )
         session.isHistogramActive.set(!shouldPausePreview && uiState.isHistogramEnabled && !isVideoMode)
         session.isBackdropActive.set(isFramedBackdropWanted)
+        session.isPortraitActive.set(isPortraitWanted)
+        session.portraitBlurIntensity.set(uiState.portraitBlurIntensity)
+        session.portraitFocusX.set(uiState.portraitFocusPointNormalized?.x)
+        session.portraitFocusY.set(uiState.portraitFocusPointNormalized?.y)
+        session.portraitQualityTier.set(uiState.portraitQualityTier)
+        session.portraitFilter.set(uiState.selectedFilter)
         session.isFrontCamera.set(uiState.lensFacing == CameraSelector.LENS_FACING_FRONT)
         session.isGestureBlocked.set(isOverlayBlocking)
         session.isScreenFlashOverlayActive.set(uiState.isScreenFlashOverlayVisible)
@@ -605,6 +642,12 @@ fun CameraViewfinder(
                 .pointerInput(uiState.lensFacing, isVideoMode, activeAspectRatio) {
                     detectTapGestures { offset ->
                         if (!session.isGestureBlocked.get()) {
+                            if (viewfinderSizePx.width > 0 && viewfinderSizePx.height > 0) {
+                                latestOnNormalizedFocusPoint?.invoke(
+                                    (offset.x / viewfinderSizePx.width.toFloat()).coerceIn(0f, 1f),
+                                    (offset.y / viewfinderSizePx.height.toFloat()).coerceIn(0f, 1f)
+                                )
+                            }
                             previewViewInstance?.let { pv ->
                                 onTapToFocus(pv.meteringPointFactory, offset.x, offset.y)
                             }
@@ -673,6 +716,19 @@ fun CameraViewfinder(
 
             // Skip GPU/Compose viewfinder HUD overlays while full-screen modal screens cover the preview
             if (!shouldPausePreview) {
+                // Real-time DSLR-style background blur overlay (subject regions remain transparent so PreviewView shines through)
+                val portraitOverlay = portraitOverlayBitmap
+                if (isPortraitWanted && portraitOverlay != null && !portraitOverlay.isRecycled) {
+                    Image(
+                        bitmap = portraitOverlay.asImageBitmap(),
+                        contentDescription = null,
+                        contentScale = ContentScale.Crop,
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .testTag("viewfinder_portrait_bokeh_overlay")
+                    )
+                }
+
                 // Only draw calibrated Compose atmosphere overlay on fallback API < 33 paths;
                 // API 33+ AGSL RuntimeShader renders split-toning & vignette directly per-pixel on GPU.
                 if (uiState.selectedFilter != CameraFilter.NATURAL && !liveFilterEffect.isFullShaderActive) {
@@ -780,7 +836,11 @@ fun CameraViewfinder(
                 targetCaptureSize = if (!isVideoMode) uiState.targetCaptureSize else null,
                 viewfinderRebindKey = uiState.viewfinderRebindKey
             ),
-            isAnalysisNeeded = !isVideoMode && (uiState.isHistogramEnabled || (activeAspectRatio != CaptureAspectRatio.RATIO_FULL && !isLowRamDevice))
+            isAnalysisNeeded = !isVideoMode && (
+                uiState.isHistogramEnabled ||
+                    uiState.cameraMode == CameraMode.PORTRAIT ||
+                    (activeAspectRatio != CaptureAspectRatio.RATIO_FULL && !isLowRamDevice)
+                )
         )
         var targetBindingRequest by remember { mutableStateOf(liveRequest) }
         if (!shouldPausePreview || uiState.viewfinderRebindKey != targetBindingRequest.core.viewfinderRebindKey) {
@@ -1076,9 +1136,14 @@ fun CameraViewfinder(
                             val (analysis, exec) = buildCombinedImageAnalysis(
                                 mainExecutor = mainExecutor,
                                 session = session,
+                                isLowRamDevice = isLowRamDevice,
                                 aspectRatio = targetBindingRequest.core.aspectRatio,
                                 onHistogramData = { bins -> latestOnHistogramData(bins) },
-                                onBackdropBitmap = { bmp -> blurredBackdropBitmap = bmp }
+                                onBackdropBitmap = { bmp -> blurredBackdropBitmap = bmp },
+                                onPortraitOverlay = { bmp, hasSubject, subjectCount, depthSource, tier ->
+                                    portraitOverlayBitmap = bmp
+                                    latestOnPortraitStatusUpdate?.invoke(hasSubject, subjectCount, depthSource, tier)
+                                }
                             )
                             session.analysisExecutor = exec
                             session.boundImageAnalysis = analysis
@@ -1661,9 +1726,11 @@ private fun probeCameraXVideoCapabilities(
 private fun buildCombinedImageAnalysis(
     mainExecutor: java.util.concurrent.Executor,
     session: ViewfinderSessionHolder,
+    isLowRamDevice: Boolean,
     aspectRatio: CaptureAspectRatio,
     onHistogramData: (List<Float>) -> Unit,
-    onBackdropBitmap: (Bitmap) -> Unit
+    onBackdropBitmap: (Bitmap) -> Unit,
+    onPortraitOverlay: (Bitmap?, Boolean, Int, PortraitDepthSource, PortraitQualityTier) -> Unit
 ): Pair<ImageAnalysis, ExecutorService> {
     val exec = Executors.newSingleThreadExecutor()
     val is16_9 = (aspectRatio == CaptureAspectRatio.RATIO_16_9 || aspectRatio == CaptureAspectRatio.RATIO_FULL)
@@ -1688,6 +1755,9 @@ private fun buildCombinedImageAnalysis(
         .build()
     var lastHistogramNs = 0L
     var lastBackdropNs = 0L
+    var lastPortraitNs = 0L
+    var slowPortraitStreak = 0
+    var fastPortraitStreak = 0
     val bins = IntArray(24)
     val backdropPixels = IntArray(36 * 48)
     analysis.setAnalyzer(exec) { imageProxy ->
@@ -1696,6 +1766,8 @@ private fun buildCombinedImageAnalysis(
                 val nowNs = System.nanoTime()
                 val wantHistogram = session.isHistogramActive.get() && (nowNs - lastHistogramNs >= 100_000_000L)
                 val wantBackdrop = session.isBackdropActive.get() && (nowNs - lastBackdropNs >= 260_000_000L)
+                val currentTier = session.portraitQualityTier.get()
+                val wantPortrait = session.isPortraitActive.get() && (nowNs - lastPortraitNs >= currentTier.previewMinIntervalNs)
 
                 if (wantHistogram) {
                     lastHistogramNs = nowNs
@@ -1823,6 +1895,73 @@ private fun buildCombinedImageAnalysis(
                         }
                     }
                 }
+
+                if (wantPortrait) {
+                    lastPortraitNs = nowNs
+                    val startMs = android.os.SystemClock.elapsedRealtime()
+                    val uprightFrame = extractUprightPortraitFrame(
+                        imageProxy = imageProxy,
+                        targetMaxDim = currentTier.previewMaxDim,
+                        isFront = session.isFrontCamera.get()
+                    )
+                    if (uprightFrame != null) {
+                        val seg = PortraitSegmentationEngine.segmentBitmap(
+                            uprightBitmap = uprightFrame,
+                            isPreviewStream = true,
+                            focusX = session.portraitFocusX.get(),
+                            focusY = session.portraitFocusY.get(),
+                            hardwareDepthFrame = null
+                        )
+                        val blur = session.portraitBlurIntensity.get().coerceIn(0f, 1f)
+                        val overlay = if (currentTier.enableLivePreviewBokeh && blur > 0.015f) {
+                            PortraitBokehRenderer.renderLivePreviewOverlay(
+                                uprightFrame = uprightFrame,
+                                segmentation = seg,
+                                blurIntensity = blur,
+                                filter = session.portraitFilter.get()
+                            )
+                        } else {
+                            null
+                        }
+                        if (!uprightFrame.isRecycled) {
+                            uprightFrame.recycle()
+                        }
+
+                        val elapsedMs = android.os.SystemClock.elapsedRealtime() - startMs
+                        var nextTier = currentTier
+                        if (elapsedMs > 160L) {
+                            slowPortraitStreak++
+                            fastPortraitStreak = 0
+                            if (slowPortraitStreak >= 3) {
+                                slowPortraitStreak = 0
+                                nextTier = when (currentTier) {
+                                    PortraitQualityTier.HIGH -> PortraitQualityTier.BALANCED
+                                    PortraitQualityTier.BALANCED -> PortraitQualityTier.EFFICIENT
+                                    PortraitQualityTier.EFFICIENT -> PortraitQualityTier.EFFICIENT
+                                }
+                            }
+                        } else if (elapsedMs < 48L && !isLowRamDevice) {
+                            fastPortraitStreak++
+                            slowPortraitStreak = 0
+                            if (fastPortraitStreak >= 6 && currentTier == PortraitQualityTier.BALANCED) {
+                                fastPortraitStreak = 0
+                                nextTier = PortraitQualityTier.HIGH
+                            }
+                        } else {
+                            slowPortraitStreak = 0
+                            fastPortraitStreak = 0
+                        }
+                        if (nextTier != currentTier) {
+                            session.portraitQualityTier.set(nextTier)
+                        }
+
+                        mainExecutor.execute {
+                            if (!session.isDisposed.get() && session.isPortraitActive.get()) {
+                                onPortraitOverlay(overlay, seg.hasSubject, seg.subjectCount, seg.source, nextTier)
+                            }
+                        }
+                    }
+                }
             }
         } catch (_: Throwable) {
         } finally {
@@ -1830,6 +1969,106 @@ private fun buildCombinedImageAnalysis(
         }
     }
     return analysis to exec
+}
+
+private fun extractUprightPortraitFrame(
+    imageProxy: androidx.camera.core.ImageProxy,
+    targetMaxDim: Int,
+    isFront: Boolean
+): Bitmap? {
+    val planes = imageProxy.planes
+    val srcW = imageProxy.width
+    val srcH = imageProxy.height
+    if (planes.isEmpty() || srcW <= 2 || srcH <= 2) return null
+
+    val rotation = imageProxy.imageInfo.rotationDegrees
+    val rotatedSwapped = rotation == 90 || rotation == 270
+    val uprightSrcW = if (rotatedSwapped) srcH else srcW
+    val uprightSrcH = if (rotatedSwapped) srcW else srcH
+    val scale = kotlin.math.min(
+        1f,
+        targetMaxDim.toFloat() / kotlin.math.max(uprightSrcW, uprightSrcH).coerceAtLeast(1)
+    )
+    val dstW = (uprightSrcW * scale).toInt().coerceAtLeast(64)
+    val dstH = (uprightSrcH * scale).toInt().coerceAtLeast(64)
+
+    val yPlane = planes[0]
+    val yBuf = yPlane.buffer
+    val yRowStride = yPlane.rowStride
+    val yPixelStride = yPlane.pixelStride
+    val yLimit = yBuf.limit()
+
+    val hasUv = planes.size >= 3
+    val uPlane = if (hasUv) planes[1] else null
+    val vPlane = if (hasUv) planes[2] else null
+    val uBuf = uPlane?.buffer
+    val vBuf = vPlane?.buffer
+    val uRowStride = uPlane?.rowStride ?: 0
+    val uPixelStride = uPlane?.pixelStride ?: 0
+    val uLimit = uBuf?.limit() ?: 0
+    val vRowStride = vPlane?.rowStride ?: 0
+    val vPixelStride = vPlane?.pixelStride ?: 0
+    val vLimit = vBuf?.limit() ?: 0
+
+    val outPixels = IntArray(dstW * dstH)
+    val wMax = srcW - 1
+    val hMax = srcH - 1
+    val xDenom = (dstW - 1).coerceAtLeast(1).toFloat()
+    val yDenom = (dstH - 1).coerceAtLeast(1).toFloat()
+
+    for (dy in 0 until dstH) {
+        val ny = dy / yDenom
+        val rowOffsetOut = dy * dstW
+        for (dx in 0 until dstW) {
+            val nx = dx / xDenom
+            val mx = if (isFront) 1f - nx else nx
+            val uNorm: Float
+            val vNorm: Float
+            when (rotation) {
+                90 -> {
+                    uNorm = ny
+                    vNorm = 1f - mx
+                }
+                180 -> {
+                    uNorm = 1f - mx
+                    vNorm = 1f - ny
+                }
+                270 -> {
+                    uNorm = 1f - ny
+                    vNorm = mx
+                }
+                else -> {
+                    uNorm = mx
+                    vNorm = ny
+                }
+            }
+            val sx = (uNorm * wMax).toInt().coerceIn(0, wMax)
+            val sy = (vNorm * hMax).toInt().coerceIn(0, hMax)
+            val yIdx = sy * yRowStride + sx * yPixelStride
+            val yVal = if (yIdx in 0 until yLimit) (yBuf.get(yIdx).toInt() and 0xFF) else 0
+
+            val r: Int
+            val g: Int
+            val b: Int
+            if (hasUv && uBuf != null && vBuf != null) {
+                val uvX = sx shr 1
+                val uvY = sy shr 1
+                val uIdx = uvY * uRowStride + uvX * uPixelStride
+                val vIdx = uvY * vRowStride + uvX * vPixelStride
+                val uVal = if (uIdx in 0 until uLimit) ((uBuf.get(uIdx).toInt() and 0xFF) - 128) else 0
+                val vVal = if (vIdx in 0 until vLimit) ((vBuf.get(vIdx).toInt() and 0xFF) - 128) else 0
+                r = (yVal + (1.370705f * vVal)).toInt().coerceIn(0, 255)
+                g = (yVal - (0.337633f * uVal) - (0.698001f * vVal)).toInt().coerceIn(0, 255)
+                b = (yVal + (1.732446f * uVal)).toInt().coerceIn(0, 255)
+            } else {
+                r = yVal
+                g = yVal
+                b = yVal
+            }
+            outPixels[rowOffsetOut + dx] = (0xFF shl 24) or (r shl 16) or (g shl 8) or b
+        }
+    }
+    return Bitmap.createBitmap(outPixels, dstW, dstH, Bitmap.Config.ARGB_8888)
 }
 
 @Composable

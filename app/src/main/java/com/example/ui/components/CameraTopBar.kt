@@ -252,8 +252,35 @@ fun CameraTopBar(
                     modifier = Modifier.testTag("app_brand_text")
                 )
 
-                // Still-photo badges (UHR, RAW/JPEG, HDR, SPEED) only appear in Photo/Pro modes, never in Video mode
+                // Still-photo badges (PORTRAIT aperture, UHR, RAW/JPEG, HDR, SPEED) only appear in still modes, never in Video mode
                 if (uiState.cameraMode != CameraMode.VIDEO) {
+
+                if (uiState.cameraMode == CameraMode.PORTRAIT) {
+                    val fStopText = com.example.model.PortraitApertureFormatter.formatFStop(uiState.portraitBlurIntensity)
+                    val apertureCd = stringResource(R.string.portrait_aperture_cd, fStopText)
+                    Box(
+                        modifier = Modifier
+                            .liquidGlassChipSurface(
+                                shape = RoundedCornerShape(8.dp),
+                                cornerRadius = 8.dp,
+                                isActive = true,
+                                accentColor = GlassCoolBlueSpecular,
+                                activeFillAlpha = 0.20f
+                            )
+                            .padding(horizontal = 5.dp, vertical = 2.dp)
+                            .semantics { contentDescription = apertureCd }
+                            .testTag("top_portrait_aperture_badge")
+                    ) {
+                        Text(
+                            text = fStopText,
+                            color = GlassCoolBlueSpecular,
+                            fontSize = 9.sp,
+                            fontWeight = FontWeight.Bold,
+                            maxLines = 1,
+                            softWrap = false
+                        )
+                    }
+                }
 
                 if (uiState.photoResolution == PhotoResolution.ULTRA_RES) {
                     val uhrText = if (uiState.uhrMegapixels > 0.0) {

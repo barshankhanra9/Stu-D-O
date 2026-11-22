@@ -24,7 +24,10 @@ data class PhysicalCameraSubSensor(
     val standardRawSizes: List<Size>,
     val maxResolutionRawSizes: List<Size>,
     val isUhrSupported: Boolean,
-    val availableFocalLengths: List<Float> = emptyList()
+    val availableFocalLengths: List<Float> = emptyList(),
+    val isDepthOutputSupported: Boolean = false,
+    val depth16Sizes: List<Size> = emptyList(),
+    val depthPointCloudSizes: List<Size> = emptyList()
 ) {
     val primaryFocalLengthMm: Float?
         get() = availableFocalLengths.firstOrNull { it.isFinite() && it > 0f }
@@ -63,7 +66,10 @@ data class CameraSensorCapability(
     val isVideoStabilizationSupported: Boolean = false,
     val isOisSupported: Boolean = false,
     val targetFpsRanges: List<Range<Int>> = emptyList(),
-    val availableFocalLengths: List<Float> = emptyList()
+    val availableFocalLengths: List<Float> = emptyList(),
+    val isDepthOutputSupported: Boolean = false,
+    val depth16Sizes: List<Size> = emptyList(),
+    val depthPointCloudSizes: List<Size> = emptyList()
 ) {
     val primaryFocalLengthMm: Float?
         get() = availableFocalLengths.firstOrNull { it.isFinite() && it > 0f }
@@ -349,6 +355,19 @@ class CameraCapabilityDetector(private val context: Context) {
         val standardJpegSizes = standardMap?.getOutputSizes(ImageFormat.JPEG)?.toList() ?: emptyList()
         val standardRawSizes = standardMap?.getOutputSizes(ImageFormat.RAW_SENSOR)?.toList() ?: emptyList()
         val highResJpegSizes = standardMap?.getHighResolutionOutputSizes(ImageFormat.JPEG)?.toList() ?: emptyList()
+        val depth16Sizes = try {
+            standardMap?.getOutputSizes(ImageFormat.DEPTH16)?.toList() ?: emptyList()
+        } catch (_: Throwable) {
+            emptyList()
+        }
+        val depthPointCloudSizes = try {
+            standardMap?.getOutputSizes(ImageFormat.DEPTH_POINT_CLOUD)?.toList() ?: emptyList()
+        } catch (_: Throwable) {
+            emptyList()
+        }
+        val isDepthOutputSupported = availableCapabilities.contains(
+            CameraMetadata.REQUEST_AVAILABLE_CAPABILITIES_DEPTH_OUTPUT
+        ) || depth16Sizes.isNotEmpty()
 
         // Maximum Resolution Stream Configuration Map (API 31+)
         val maxResJpegSizes = mutableListOf<Size>()
@@ -403,6 +422,20 @@ class CameraCapabilityDetector(private val context: Context) {
 
                     val pFocalLengths = physChars.get(CameraCharacteristics.LENS_INFO_AVAILABLE_FOCAL_LENGTHS)
                         ?.filter { it.isFinite() && it > 0f } ?: emptyList()
+                    val pCapsAll = physChars.get(CameraCharacteristics.REQUEST_AVAILABLE_CAPABILITIES) ?: intArrayOf()
+                    val pDepth16Sizes = try {
+                        pStandardMap?.getOutputSizes(ImageFormat.DEPTH16)?.toList() ?: emptyList()
+                    } catch (_: Throwable) {
+                        emptyList()
+                    }
+                    val pDepthPointSizes = try {
+                        pStandardMap?.getOutputSizes(ImageFormat.DEPTH_POINT_CLOUD)?.toList() ?: emptyList()
+                    } catch (_: Throwable) {
+                        emptyList()
+                    }
+                    val pDepthSupported = pCapsAll.contains(
+                        CameraMetadata.REQUEST_AVAILABLE_CAPABILITIES_DEPTH_OUTPUT
+                    ) || pDepth16Sizes.isNotEmpty()
 
                     physicalSubSensors.add(
                         PhysicalCameraSubSensor(
@@ -415,7 +448,10 @@ class CameraCapabilityDetector(private val context: Context) {
                             standardRawSizes = pStandardRaw.sortedByDescending { it.width.toLong() * it.height.toLong() },
                             maxResolutionRawSizes = pMaxResRaw.sortedByDescending { it.width.toLong() * it.height.toLong() },
                             isUhrSupported = pUhrSupported,
-                            availableFocalLengths = pFocalLengths
+                            availableFocalLengths = pFocalLengths,
+                            isDepthOutputSupported = pDepthSupported,
+                            depth16Sizes = pDepth16Sizes.sortedByDescending { it.width.toLong() * it.height.toLong() },
+                            depthPointCloudSizes = pDepthPointSizes.sortedByDescending { it.width.toLong() * it.height.toLong() }
                         )
                     )
                 } catch (_: Exception) {}
@@ -683,7 +719,10 @@ class CameraCapabilityDetector(private val context: Context) {
             isVideoStabilizationSupported = isVideoStabSupported,
             isOisSupported = isOisSupported,
             targetFpsRanges = fpsRanges.toList(),
-            availableFocalLengths = availableFocalLengths
+            availableFocalLengths = availableFocalLengths,
+            isDepthOutputSupported = isDepthOutputSupported || physicalSubSensors.any { it.isDepthOutputSupported },
+            depth16Sizes = depth16Sizes.sortedByDescending { it.width.toLong() * it.height.toLong() },
+            depthPointCloudSizes = depthPointCloudSizes.sortedByDescending { it.width.toLong() * it.height.toLong() }
         )
     }
 
@@ -746,6 +785,12 @@ class CameraCapabilityDetector(private val context: Context) {
 
             // RAW Support
             sb.appendLine("RAW_SENSOR Support: ${if (cam.isRawSupported) "YES (Supported)" else "NO"}")
+            val depthSummary = when {
+                cam.depth16Sizes.isNotEmpty() -> "YES (DEPTH16 ${cam.depth16Sizes.first().width}×${cam.depth16Sizes.first().height})"
+                cam.isDepthOutputSupported -> "YES (DEPTH_OUTPUT capability / sub-sensor)"
+                else -> "NO (AI + Multi-Cue Software Portrait Depth Fallback)"
+            }
+            sb.appendLine("Portrait Hardware Depth: $depthSummary")
 
             // Logical / Physical Camera Sub-Sensors
             if (cam.physicalCameraIds.isNotEmpty()) {

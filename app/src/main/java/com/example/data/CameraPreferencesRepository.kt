@@ -61,6 +61,7 @@ class CameraPreferencesRepository(context: Context) {
         private const val KEY_VIDEO_STABILIZATION = "pref_video_stabilization"
         private const val KEY_SELFIE_MIRROR = "pref_selfie_mirror"
         private const val KEY_SAVE_LOCATION = "pref_save_location"
+        private const val KEY_PORTRAIT_BLUR_INTENSITY = "pref_portrait_blur_intensity"
 
         fun watermarkConfigToJson(config: WatermarkConfig): JSONObject {
             return JSONObject().apply {
@@ -603,5 +604,14 @@ class CameraPreferencesRepository(context: Context) {
 
     fun saveCapturePriority(priority: com.example.model.CapturePriority) {
         prefs.edit().putString("pref_capture_priority", priority.name).apply()
+    }
+
+    // Portrait Mode Blur Intensity (0f = f/16 sharp, 1f = f/1.4 strong bokeh)
+    fun getPortraitBlurIntensity(): Float {
+        return prefs.getFloat(KEY_PORTRAIT_BLUR_INTENSITY, 0.62f).coerceIn(0f, 1f)
+    }
+
+    fun savePortraitBlurIntensity(intensity: Float) {
+        prefs.edit().putFloat(KEY_PORTRAIT_BLUR_INTENSITY, intensity.coerceIn(0f, 1f)).apply()
     }
 }

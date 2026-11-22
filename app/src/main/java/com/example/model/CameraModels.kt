@@ -11,9 +11,61 @@ import androidx.compose.ui.graphics.Color
 
 enum class CameraMode(val displayName: String) {
     PHOTO("PHOTO"),
+    PORTRAIT("PORTRAIT"),
     PRO("PRO"),
     VIDEO("VIDEO")
 }
+
+enum class PortraitDepthSource(val displayName: String, val badgeLabel: String) {
+    HARDWARE_DEPTH("Hardware Depth", "HW DEPTH"),
+    AI_SEGMENTATION("AI Portrait Depth", "AI DEPTH"),
+    HYBRID("Hybrid HW + AI", "HYBRID")
+}
+
+enum class PortraitQualityTier(
+    val displayName: String,
+    val previewMaxDim: Int,
+    val previewMinIntervalNs: Long,
+    val enableLivePreviewBokeh: Boolean
+) {
+    HIGH("High", 480, 75_000_000L, true),
+    BALANCED("Balanced", 360, 125_000_000L, true),
+    EFFICIENT("Capture Only", 320, 220_000_000L, false)
+}
+
+object PortraitApertureFormatter {
+    fun blurIntensityToFStop(blurIntensity: Float): Float {
+        val clamped = blurIntensity.coerceIn(0f, 1f)
+        // Smooth logarithmic aperture scale from f/16.0 (0% blur) down to f/1.4 (100% blur)
+        return (16.0 * Math.pow((1.4 / 16.0), clamped.toDouble())).toFloat()
+    }
+
+    fun formatFStop(blurIntensity: Float): String {
+        val f = blurIntensityToFStop(blurIntensity)
+        return if (f >= 10f) {
+            String.format(java.util.Locale.US, "f/%.0f", f)
+        } else {
+            String.format(java.util.Locale.US, "f/%.1f", f)
+        }
+    }
+}
+
+@Immutable
+data class PostCapturePortraitTarget(
+    val galleryUri: Uri,
+    val originalId: String,
+    val originalFilePath: String,
+    val depthMapFilePath: String,
+    val alphaMatteFilePath: String,
+    val width: Int,
+    val height: Int,
+    val blurIntensity: Float,
+    val focusX: Float,
+    val focusY: Float,
+    val depthSource: PortraitDepthSource,
+    val watermarkConfig: WatermarkConfig,
+    val metadata: com.example.util.RealCameraMetadata = com.example.util.RealCameraMetadata()
+)
 
 enum class ActiveCameraPanel {
     NONE,
@@ -936,7 +988,19 @@ data class CameraUiState(
     val pendingEditorWatermarkResult: PendingEditorWatermarkResult? = null,
     // Active camera/lens physical focal length (from Camera2 LENS_INFO_AVAILABLE_FOCAL_LENGTHS / CaptureResult)
     val activeFocalLengthMm: Float? = null,
-    val activeFocalLengthText: String? = null
+    val activeFocalLengthText: String? = null,
+    // Dedicated Portrait Mode State
+    val portraitBlurIntensity: Float = 0.62f,
+    val portraitFocusPointNormalized: Offset? = null,
+    val portraitDepthSource: PortraitDepthSource = PortraitDepthSource.AI_SEGMENTATION,
+    val isPortraitHardwareDepthSupported: Boolean = false,
+    val isPortraitSubjectDetected: Boolean = false,
+    val portraitSubjectCount: Int = 0,
+    val portraitQualityTier: PortraitQualityTier = PortraitQualityTier.BALANCED,
+    val postCapturePortraitTarget: PostCapturePortraitTarget? = null,
+    val isPortraitEditorOpen: Boolean = false,
+    val isPortraitEditorSaving: Boolean = false,
+    val portraitSidecarRevision: Long = 0L
 ) {
     val effectiveTimerSeconds: Int
         get() = selectedTimer.effectiveSeconds(customTimerSeconds)

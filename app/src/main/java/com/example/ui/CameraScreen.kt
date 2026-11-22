@@ -72,6 +72,8 @@ import com.example.ui.components.CountdownTimerOverlay
 import com.example.ui.components.LiveHistogramView
 import com.example.ui.components.PermissionScreen
 import com.example.ui.components.PhotoPreviewDialog
+import com.example.ui.components.PortraitBlurEditorDialog
+import com.example.ui.components.PortraitControlsBar
 import com.example.ui.components.ProControlsBar
 import com.example.ui.components.RecycleBinDialog
 import com.example.ui.components.StuDOSplashAnimation
@@ -359,6 +361,7 @@ fun CameraScreen(
         uiState.isLevelIndicatorEnabled,
         uiState.isSettingsOpen,
         uiState.isPhotoEditorOpen,
+        uiState.isPortraitEditorOpen,
         uiState.isWatermarkStudioOpen,
         uiState.isRecycleBinOpen,
         isGalleryActive
@@ -366,6 +369,7 @@ fun CameraScreen(
         if (!uiState.isLevelIndicatorEnabled ||
             uiState.isSettingsOpen ||
             uiState.isPhotoEditorOpen ||
+            uiState.isPortraitEditorOpen ||
             uiState.isWatermarkStudioOpen ||
             uiState.isRecycleBinOpen ||
             isGalleryActive
@@ -525,7 +529,16 @@ fun CameraScreen(
                 { viewModel.dismissScreenFlash() }
             }
 
-            // Live Viewfinder (CameraX Preview + Gestures + Framing Grid + Level + Filters)
+            val onPortraitStatusUpdate = remember(viewModel) {
+                { hasSubject: Boolean, subjectCount: Int, depthSource: com.example.model.PortraitDepthSource, qualityTier: com.example.model.PortraitQualityTier ->
+                    viewModel.onPortraitPreviewUpdate(hasSubject, subjectCount, depthSource, qualityTier)
+                }
+            }
+            val onNormalizedFocusPoint = remember(viewModel) {
+                { nx: Float, ny: Float -> viewModel.setPortraitFocusPoint(nx, ny) }
+            }
+
+            // Live Viewfinder (CameraX Preview + Gestures + Framing Grid + Level + Filters + Portrait Live Bokeh)
             CameraViewfinder(
                 uiState = uiState,
                 orientationState = viewModel.orientationState,
@@ -543,12 +556,15 @@ fun CameraScreen(
                 onFullScreenAspectRatioChanged = onFullScreenAspectRatioChanged,
                 onLowLightChanged = onLowLightChanged,
                 onScreenFlashApplyRequested = onScreenFlashApplyRequested,
-                onScreenFlashClearRequested = onScreenFlashClearRequested
+                onScreenFlashClearRequested = onScreenFlashClearRequested,
+                onPortraitStatusUpdate = onPortraitStatusUpdate,
+                onNormalizedFocusPoint = onNormalizedFocusPoint
             )
 
             val isFullScreenModalOpen = uiState.isSettingsOpen ||
                 uiState.isWatermarkStudioOpen ||
                 uiState.isPhotoEditorOpen ||
+                uiState.isPortraitEditorOpen ||
                 uiState.isRecycleBinOpen ||
                 isGalleryActive
 
@@ -683,6 +699,21 @@ fun CameraScreen(
                     )
                 }
 
+                // Portrait Mode Optical Aperture & Blur Controls Dock
+                AnimatedVisibility(
+                    visible = uiState.cameraMode == CameraMode.PORTRAIT,
+                    enter = slideInVertically { it } + fadeIn(),
+                    exit = slideOutVertically { it } + fadeOut(),
+                    modifier = Modifier
+                        .align(Alignment.BottomCenter)
+                        .padding(bottom = 200.dp)
+                ) {
+                    PortraitControlsBar(
+                        uiState = uiState,
+                        onBlurIntensityChanged = { viewModel.setPortraitBlurIntensity(it) }
+                    )
+                }
+
                 // Pro Mode Manual Controls Dock (ISO, Shutter, EV, Focus, White Balance)
                 AnimatedVisibility(
                     visible = uiState.cameraMode == CameraMode.PRO,
@@ -746,6 +777,12 @@ fun CameraScreen(
                     onEditWatermark = { item ->
                         viewModel.requestEditWatermark(item)
                     },
+                    isPortraitEditable = remember(uiState.portraitSidecarRevision) {
+                        { item -> viewModel.hasPortraitSidecar(item) }
+                    },
+                    onEditPortrait = { item ->
+                        viewModel.openPortraitEditor(item)
+                    },
                     binCount = uiState.binCount,
                     onOpenRecycleBin = { viewModel.openRecycleBin() },
                     mediaRevision = uiState.galleryMediaRevision,
@@ -759,6 +796,24 @@ fun CameraScreen(
                             viewModel.openPhotoEditor(unavailableUri)
                         }
                     } else null
+                )
+            }
+
+            // Non-Destructive Post-Capture Portrait Depth & Blur Editor
+            val portraitTarget = uiState.postCapturePortraitTarget
+            if (uiState.isPortraitEditorOpen && portraitTarget != null) {
+                PortraitBlurEditorDialog(
+                    target = portraitTarget,
+                    sidecarStorage = viewModel.portraitSidecarStorage,
+                    isSaving = uiState.isPortraitEditorSaving,
+                    hapticsEnabled = uiState.isHapticFeedbackEnabled,
+                    onUpdateExisting = { blur, fx, fy ->
+                        viewModel.savePortraitUpdateExisting(blur, fx, fy)
+                    },
+                    onSaveCopy = { blur, fx, fy ->
+                        viewModel.savePortraitSaveCopy(blur, fx, fy)
+                    },
+                    onDismiss = { viewModel.closePortraitEditor() }
                 )
             }
 

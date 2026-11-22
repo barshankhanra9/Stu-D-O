@@ -13,4 +13,19 @@
     <string name="screen_flash_cd_on">Screen Flash: On</string>
     <string name="flash_cd_mode">Flash mode: %1$s</string>
     <string name="screen_flash_overlay_cd">Screen Flash illumination active</string>
+    <string name="mode_portrait">PORTRAIT</string>
+    <string name="portrait_blur_label">Background Blur</string>
+    <string name="portrait_aperture_cd">Portrait aperture %1$s</string>
+    <string name="portrait_depth_hardware">HW Depth</string>
+    <string name="portrait_depth_ai">AI Depth</string>
+    <string name="portrait_depth_hybrid">Hybrid Depth</string>
+    <string name="portrait_subject_single">Subject Locked</string>
+    <string name="portrait_subject_multiple">%1$d Subjects</string>
+    <string name="portrait_subject_searching">Frame Subject</string>
+    <string name="portrait_edit_blur">Portrait Blur</string>
+    <string name="portrait_editor_title">Portrait Depth Studio</string>
+    <string name="portrait_editor_hint">Drag slider to adjust f-stop blur · Tap subject to refocus</string>
+    <string name="portrait_editor_update">Update Photo</string>
+    <string name="portrait_editor_save_copy">Save Copy</string>
+    <string name="portrait_editor_original_preserved">Original unblurred image preserved safely</string>
 </resources>

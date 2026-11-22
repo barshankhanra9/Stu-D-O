@@ -50,6 +50,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.BrandingWatermark
 import androidx.compose.material.icons.filled.AutoAwesome
+import androidx.compose.material.icons.filled.BlurOn
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.FastForward
 import androidx.compose.material.icons.filled.FastRewind
@@ -147,6 +148,8 @@ fun PhotoPreviewDialog(
     onGetDetails: (MediaItem) -> PhotoDetails,
     onEditPhoto: ((MediaItem) -> Unit)? = null,
     onEditWatermark: ((MediaItem) -> Unit)? = null,
+    isPortraitEditable: ((MediaItem) -> Boolean)? = null,
+    onEditPortrait: ((MediaItem) -> Unit)? = null,
     binCount: Int = 0,
     onOpenRecycleBin: () -> Unit = {},
     mediaRevision: Long = 0L,
@@ -256,6 +259,9 @@ fun PhotoPreviewDialog(
         }
 
         // Cohesive Two-Capsule Liquid Glass Top Toolbar
+        val canEditPortrait = !currentItem.isVideo &&
+            onEditPortrait != null &&
+            (isPortraitEditable?.invoke(currentItem) == true)
         PhotoPreviewTopToolbar(
             currentIndex = currentIndex,
             totalCount = items.size,
@@ -263,6 +269,8 @@ fun PhotoPreviewDialog(
             showDetailsSheet = showDetailsSheet,
             binCount = binCount,
             onDismiss = onDismiss,
+            canEditPortrait = canEditPortrait,
+            onEditPortrait = onEditPortrait,
             onEditWatermark = onEditWatermark,
             onEditPhoto = onEditPhoto,
             onToggleDetails = { showDetailsSheet = !showDetailsSheet },
@@ -434,6 +442,8 @@ private fun PhotoPreviewTopToolbar(
     showDetailsSheet: Boolean,
     binCount: Int,
     onDismiss: () -> Unit,
+    canEditPortrait: Boolean,
+    onEditPortrait: ((MediaItem) -> Unit)?,
     onEditWatermark: ((MediaItem) -> Unit)?,
     onEditPhoto: ((MediaItem) -> Unit)?,
     onToggleDetails: () -> Unit,
@@ -449,10 +459,24 @@ private fun PhotoPreviewTopToolbar(
             .testTag("preview_top_toolbar")
     ) {
         val isCompact = maxWidth < 395.dp
-        val hasTwoEditButtons = !currentItem.isVideo && onEditWatermark != null && onEditPhoto != null
-        val showMediaTypeBadge = !isCompact || !hasTwoEditButtons
-        val buttonSize = if (isCompact) 30.dp else 36.dp
-        val iconSize = if (isCompact) 15.dp else 17.dp
+        val editActionCount = if (currentItem.isVideo) {
+            0
+        } else {
+            (if (canEditPortrait && onEditPortrait != null) 1 else 0) +
+                (if (onEditWatermark != null) 1 else 0) +
+                (if (onEditPhoto != null) 1 else 0)
+        }
+        val showMediaTypeBadge = !isCompact || editActionCount < 2
+        val buttonSize = when {
+            isCompact && editActionCount >= 3 -> 27.dp
+            isCompact -> 30.dp
+            else -> 36.dp
+        }
+        val iconSize = when {
+            isCompact && editActionCount >= 3 -> 14.dp
+            isCompact -> 15.dp
+            else -> 17.dp
+        }
         val buttonGap = if (isCompact) 3.dp else 5.dp
         val capsuleHPad = if (isCompact) 5.dp else 6.dp
 
@@ -546,7 +570,7 @@ private fun PhotoPreviewTopToolbar(
             Spacer(modifier = Modifier.width(if (isCompact) 4.dp else 8.dp))
 
             // Right Capsule: Balanced Action Hierarchy with Restrained Glass Delete & StuDO Bin
-            val hasEditActions = !currentItem.isVideo && (onEditWatermark != null || onEditPhoto != null)
+            val hasEditActions = editActionCount > 0
             Row(
                 modifier = Modifier
                     .liquidGlassSurface(
@@ -564,6 +588,30 @@ private fun PhotoPreviewTopToolbar(
                 horizontalArrangement = Arrangement.spacedBy(buttonGap),
                 verticalAlignment = Alignment.CenterVertically
             ) {
+                if (!currentItem.isVideo && canEditPortrait && onEditPortrait != null) {
+                    Box(
+                        modifier = Modifier
+                            .size(buttonSize)
+                            .liquidGlassChipSurface(
+                                shape = CircleShape,
+                                cornerRadius = 18.dp,
+                                isActive = true,
+                                accentColor = GlassCoolBlueSpecular,
+                                activeFillAlpha = 0.22f
+                            )
+                            .clickable { onEditPortrait(currentItem) }
+                            .testTag("preview_edit_portrait_button"),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.BlurOn,
+                            contentDescription = "Edit portrait blur",
+                            tint = GlassCoolBlueSpecular,
+                            modifier = Modifier.size(iconSize)
+                        )
+                    }
+                }
+
                 if (!currentItem.isVideo && onEditWatermark != null) {
                     Box(
                         modifier = Modifier
