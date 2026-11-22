@@ -39,6 +39,7 @@ class CameraPreferencesRepository(context: Context) {
         private const val KEY_KEEP_SCREEN_AWAKE = "pref_keep_screen_awake"
         private const val KEY_VOLUME_KEY_ACTION = "pref_volume_key_action"
         private const val KEY_FILTER = "pref_filter"
+        private const val KEY_SCREEN_FLASH_MODE = "pref_screen_flash_mode"
 
         private const val KEY_PHOTO_RESOLUTION = "pref_photo_resolution"
         private const val KEY_HDR_ENABLED = "pref_hdr_enabled"
@@ -250,6 +251,20 @@ class CameraPreferencesRepository(context: Context) {
 
     fun saveFilter(filter: CameraFilter) {
         prefs.edit().putString(KEY_FILTER, filter.name).apply()
+    }
+
+    // Screen Flash Mode
+    fun getScreenFlashMode(): com.example.model.ScreenFlashMode {
+        val name = prefs.getString(KEY_SCREEN_FLASH_MODE, com.example.model.ScreenFlashMode.OFF.name)
+        return try {
+            com.example.model.ScreenFlashMode.valueOf(name ?: com.example.model.ScreenFlashMode.OFF.name)
+        } catch (_: Exception) {
+            com.example.model.ScreenFlashMode.OFF
+        }
+    }
+
+    fun saveScreenFlashMode(mode: com.example.model.ScreenFlashMode) {
+        prefs.edit().putString(KEY_SCREEN_FLASH_MODE, mode.name).apply()
     }
 
     // Horizon Level

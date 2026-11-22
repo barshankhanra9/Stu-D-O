@@ -1,16 +1,20 @@
 package com.example.ui
 
 import android.Manifest
+import android.app.Activity
 import android.content.Context
+import android.content.ContextWrapper
 import android.content.pm.PackageManager
 import android.hardware.Sensor
 import android.hardware.SensorEvent
 import android.hardware.SensorEventListener
 import android.hardware.SensorManager
+import android.view.WindowManager
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.slideInVertically
@@ -32,6 +36,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -40,10 +45,18 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.zIndex
 import androidx.core.content.ContextCompat
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.example.R
 import com.example.model.ActiveCameraPanel
 import com.example.model.CameraMode
 import com.example.model.CaptureAspectRatio
@@ -197,16 +210,72 @@ private fun WatermarkStudioOverlayHost(
     )
 }
 
+private tailrec fun Context.findActivity(): Activity? = when (this) {
+    is Activity -> this
+    is ContextWrapper -> baseContext.findActivity()
+    else -> null
+}
+
 @Composable
 fun CameraScreen(
     viewModel: CameraViewModel,
     modifier: Modifier = Modifier
 ) {
     val context = LocalContext.current
+    val activity = remember(context) { context.findActivity() }
+    val lifecycleOwner = LocalLifecycleOwner.current
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
     val mediaCaptureManager = viewModel.mediaCaptureManager
     val snackbarHostState = remember { SnackbarHostState() }
     var isSplashFinished by remember { mutableStateOf(false) }
+    var savedBrightnessBeforeScreenFlash by remember { mutableStateOf<Float?>(null) }
+
+    fun restoreScreenFlashBrightness() {
+        val prevBrightness = savedBrightnessBeforeScreenFlash ?: return
+        savedBrightnessBeforeScreenFlash = null
+        val window = activity?.window ?: return
+        val lp = window.attributes
+        if (lp.screenBrightness != prevBrightness) {
+            lp.screenBrightness = prevBrightness
+            window.attributes = lp
+        }
+    }
+
+    LaunchedEffect(uiState.isScreenFlashOverlayVisible, activity) {
+        if (uiState.isScreenFlashOverlayVisible) {
+            val window = activity?.window
+            if (window != null) {
+                val lp = window.attributes
+                if (savedBrightnessBeforeScreenFlash == null) {
+                    savedBrightnessBeforeScreenFlash = lp.screenBrightness
+                }
+                if (lp.screenBrightness != WindowManager.LayoutParams.BRIGHTNESS_OVERRIDE_FULL) {
+                    lp.screenBrightness = WindowManager.LayoutParams.BRIGHTNESS_OVERRIDE_FULL
+                    window.attributes = lp
+                }
+            }
+            withFrameNanos { }
+            kotlinx.coroutines.delay(65L)
+            viewModel.onScreenFlashSurfaceReady()
+        } else {
+            restoreScreenFlashBrightness()
+        }
+    }
+
+    DisposableEffect(lifecycleOwner, activity, viewModel) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_PAUSE || event == Lifecycle.Event.ON_STOP) {
+                restoreScreenFlashBrightness()
+                viewModel.dismissScreenFlash()
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose {
+            lifecycleOwner.lifecycle.removeObserver(observer)
+            restoreScreenFlashBrightness()
+            viewModel.dismissScreenFlash()
+        }
+    }
 
     val cameraPermissionLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.RequestPermission()
@@ -444,6 +513,18 @@ fun CameraScreen(
             val onThumbnailClick = remember(viewModel, mediaCaptureManager) { { uri: android.net.Uri -> viewModel.openGallery(mediaCaptureManager, uri) } }
             val onTogglePauseResume = remember(viewModel) { { viewModel.togglePauseResumeVideoRecording() } }
 
+            val onLowLightChanged = remember(viewModel) {
+                { isLowLight: Boolean -> viewModel.onLowLightConditionChanged(isLowLight) }
+            }
+            val onScreenFlashApplyRequested = remember(viewModel) {
+                { expirationMs: Long, listener: androidx.camera.core.ImageCapture.ScreenFlashListener ->
+                    viewModel.onScreenFlashApplyRequested(expirationMs, listener)
+                }
+            }
+            val onScreenFlashClearRequested = remember(viewModel) {
+                { viewModel.dismissScreenFlash() }
+            }
+
             // Live Viewfinder (CameraX Preview + Gestures + Framing Grid + Level + Filters)
             CameraViewfinder(
                 uiState = uiState,
@@ -459,7 +540,10 @@ fun CameraScreen(
                 onTargetRotationChanged = onTargetRotationChanged,
                 onHistogramData = onHistogramData,
                 onActiveLensFocalLengthChanged = onActiveLensFocalLengthChanged,
-                onFullScreenAspectRatioChanged = onFullScreenAspectRatioChanged
+                onFullScreenAspectRatioChanged = onFullScreenAspectRatioChanged,
+                onLowLightChanged = onLowLightChanged,
+                onScreenFlashApplyRequested = onScreenFlashApplyRequested,
+                onScreenFlashClearRequested = onScreenFlashClearRequested
             )
 
             val isFullScreenModalOpen = uiState.isSettingsOpen ||
@@ -725,6 +809,32 @@ fun CameraScreen(
                     onDismiss = { viewModel.closeDiagnostics() }
                 )
             }
+        }
+
+        // Front Camera Screen Flash illumination surface (display-only, never captured into photo)
+        AnimatedVisibility(
+            visible = uiState.isScreenFlashOverlayVisible,
+            enter = fadeIn(animationSpec = tween(durationMillis = 65)),
+            exit = fadeOut(animationSpec = tween(durationMillis = 150)),
+            modifier = Modifier
+                .fillMaxSize()
+                .zIndex(50f)
+        ) {
+            val overlayCd = stringResource(R.string.screen_flash_overlay_cd)
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .background(Color(0xFFFFF8EE))
+                    .semantics { contentDescription = overlayCd }
+                    .pointerInput(Unit) {
+                        awaitPointerEventScope {
+                            while (true) {
+                                awaitPointerEvent()
+                            }
+                        }
+                    }
+                    .testTag("screen_flash_illumination_overlay")
+            )
         }
 
         // Minimalist translucent Liquid Glass snackbar

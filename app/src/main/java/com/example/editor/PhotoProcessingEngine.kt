@@ -177,13 +177,27 @@ object PhotoProcessingEngine {
                     if (crop.isFlippedVertical) -1f else 1f
                 )
             }
-            val oriented = Bitmap.createBitmap(source, 0, 0, source.width, source.height, matrix, true)
+            val oriented = try {
+                Bitmap.createBitmap(source, 0, 0, source.width, source.height, matrix, true)
+            } catch (_: OutOfMemoryError) {
+                com.example.util.WatermarkPainter.clearSampleCache()
+                System.gc()
+                Bitmap.createBitmap(source, 0, 0, source.width, source.height, matrix, true)
+            }
             if (recycleSource && oriented !== source) source.recycle()
             oriented
+        } else if (recycleSource && source.isMutable && source.config == Bitmap.Config.ARGB_8888) {
+            source
         } else {
-            source.copy(Bitmap.Config.ARGB_8888, true).also {
-                if (recycleSource) source.recycle()
+            val copy = try {
+                source.copy(Bitmap.Config.ARGB_8888, true)
+            } catch (_: OutOfMemoryError) {
+                com.example.util.WatermarkPainter.clearSampleCache()
+                System.gc()
+                source.copy(Bitmap.Config.ARGB_8888, true)
             }
+            if (recycleSource && copy !== source) source.recycle()
+            copy
         }
 
         if (applyCropRect && crop.hasActiveCropRect()) {
@@ -194,7 +208,13 @@ object PhotoProcessingEngine {
             val cropY = (rect.top * origH).roundToInt().coerceIn(0, origH - 1)
             val cropW = ((rect.right - rect.left) * origW).roundToInt().coerceIn(1, origW - cropX)
             val cropH = ((rect.bottom - rect.top) * origH).roundToInt().coerceIn(1, origH - cropY)
-            val cropped = Bitmap.createBitmap(working, cropX, cropY, cropW, cropH)
+            val cropped = try {
+                Bitmap.createBitmap(working, cropX, cropY, cropW, cropH)
+            } catch (_: OutOfMemoryError) {
+                com.example.util.WatermarkPainter.clearSampleCache()
+                System.gc()
+                Bitmap.createBitmap(working, cropX, cropY, cropW, cropH)
+            }
             if (cropped !== working) working.recycle()
             working = cropped
         }
@@ -202,7 +222,13 @@ object PhotoProcessingEngine {
         return if (working.isMutable && working.config == Bitmap.Config.ARGB_8888) {
             working
         } else {
-            val mutable = working.copy(Bitmap.Config.ARGB_8888, true)
+            val mutable = try {
+                working.copy(Bitmap.Config.ARGB_8888, true)
+            } catch (_: OutOfMemoryError) {
+                com.example.util.WatermarkPainter.clearSampleCache()
+                System.gc()
+                working.copy(Bitmap.Config.ARGB_8888, true)
+            }
             working.recycle()
             mutable
         }
@@ -658,7 +684,8 @@ object PhotoProcessingEngine {
                 source = working,
                 clarity = effClarity,
                 texture = adjustments.texture,
-                sharpness = adjustments.sharpness
+                sharpness = adjustments.sharpness,
+                inPlace = working.isMutable && working.config == Bitmap.Config.ARGB_8888
             )
             if (detailed !== working) {
                 working.recycle()
@@ -680,12 +707,16 @@ object PhotoProcessingEngine {
      * - Clarity (5x5 local contrast weighted softly in midtones)
      * - Texture (3x3 fine surface micro-detail)
      * - Sharpness (edge-cored 3x3 crispness without amplifying smooth noise)
+     *
+     * When [inPlace] is true, writes filtered rows back directly into [source] using only the
+     * 5-row sliding input buffer (~a few KB), avoiding a second full-resolution bitmap allocation.
      */
-    private fun applyDetailConvolutionLineBuffered(
+    internal fun applyDetailConvolutionLineBuffered(
         source: Bitmap,
         clarity: Float,
         texture: Float,
-        sharpness: Float
+        sharpness: Float,
+        inPlace: Boolean = false
     ): Bitmap {
         val width = source.width
         val height = source.height
@@ -693,14 +724,19 @@ object PhotoProcessingEngine {
             return if (sharpness > 0.01f) applySharpnessFilter(source, sharpness) else source
         }
 
-        val output = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
-        val copyRow = IntArray(width)
-        // Copy top/bottom 2 border rows unmodified
-        for (y in 0 until 2) {
-            source.getPixels(copyRow, 0, width, 0, y, width, 1)
-            output.setPixels(copyRow, 0, width, 0, y, width, 1)
-            source.getPixels(copyRow, 0, width, 0, height - 1 - y, width, 1)
-            output.setPixels(copyRow, 0, width, 0, height - 1 - y, width, 1)
+        val target = if (inPlace && source.isMutable && source.config == Bitmap.Config.ARGB_8888) {
+            source
+        } else {
+            val out = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
+            val copyRow = IntArray(width)
+            // Copy top/bottom 2 border rows unmodified
+            for (y in 0 until 2) {
+                source.getPixels(copyRow, 0, width, 0, y, width, 1)
+                out.setPixels(copyRow, 0, width, 0, y, width, 1)
+                source.getPixels(copyRow, 0, width, 0, height - 1 - y, width, 1)
+                out.setPixels(copyRow, 0, width, 0, height - 1 - y, width, 1)
+            }
+            out
         }
 
         val rows = Array(5) { IntArray(width) }
@@ -794,10 +830,10 @@ object PhotoProcessingEngine {
                 outRow[x] = (a shl 24) or (outR shl 16) or (outG shl 8) or outB
             }
 
-            output.setPixels(outRow, 0, width, 0, y, width, 1)
+            target.setPixels(outRow, 0, width, 0, y, width, 1)
         }
 
-        return output
+        return target
     }
 
     /**
@@ -938,42 +974,56 @@ object PhotoProcessingEngine {
             context.contentResolver.openInputStream(sourceUri)?.use { stream ->
                 BitmapFactory.decodeStream(stream, null, bounds)
             }
-            var sampleSize = 1
-            val maxSupportedExportDim = 6144
-            if (bounds.outWidth > 0 && bounds.outHeight > 0) {
-                val maxSide = max(bounds.outWidth, bounds.outHeight)
-                while (maxSide / sampleSize > maxSupportedExportDim) {
-                    sampleSize *= 2
-                }
-            }
 
+            val detectedMime = bounds.outMimeType ?: context.contentResolver.getType(sourceUri)
+            val isPngSource = detectedMime.equals("image/png", ignoreCase = true) ||
+                sourceUri.toString().lowercase(Locale.US).endsWith(".png")
+
+            // Never downsample during export: preserve exact full native sensor / source resolution
             val decodeOptions = BitmapFactory.Options().apply {
-                inSampleSize = sampleSize
+                inSampleSize = 1
+                inScaled = false
                 inMutable = true
                 inPreferredConfig = Bitmap.Config.ARGB_8888
             }
-            var workingBitmap = context.contentResolver.openInputStream(sourceUri)?.use { stream ->
-                BitmapFactory.decodeStream(stream, null, decodeOptions)
+            var workingBitmap = try {
+                context.contentResolver.openInputStream(sourceUri)?.use { stream ->
+                    BitmapFactory.decodeStream(stream, null, decodeOptions)
+                }
+            } catch (_: OutOfMemoryError) {
+                com.example.util.WatermarkPainter.clearSampleCache()
+                System.gc()
+                context.contentResolver.openInputStream(sourceUri)?.use { stream ->
+                    BitmapFactory.decodeStream(stream, null, decodeOptions)
+                }
             } ?: return@withContext null
 
             var srcExifOrientation = ExifInterface.ORIENTATION_NORMAL
-            try {
-                context.contentResolver.openInputStream(sourceUri)?.use { stream ->
-                    srcExifOrientation = ExifInterface(stream).getAttributeInt(
-                        ExifInterface.TAG_ORIENTATION,
-                        ExifInterface.ORIENTATION_NORMAL
-                    )
-                }
-            } catch (_: Exception) {}
+            if (!isPngSource) {
+                try {
+                    context.contentResolver.openInputStream(sourceUri)?.use { stream ->
+                        srcExifOrientation = ExifInterface(stream).getAttributeInt(
+                            ExifInterface.TAG_ORIENTATION,
+                            ExifInterface.ORIENTATION_NORMAL
+                        )
+                    }
+                } catch (_: Exception) {}
+            }
 
             val exifMatrix = matrixForExifOrientation(srcExifOrientation)
             if (!exifMatrix.isIdentity) {
-                val rotated = Bitmap.createBitmap(workingBitmap, 0, 0, workingBitmap.width, workingBitmap.height, exifMatrix, true)
+                val rotated = try {
+                    Bitmap.createBitmap(workingBitmap, 0, 0, workingBitmap.width, workingBitmap.height, exifMatrix, true)
+                } catch (_: OutOfMemoryError) {
+                    com.example.util.WatermarkPainter.clearSampleCache()
+                    System.gc()
+                    Bitmap.createBitmap(workingBitmap, 0, 0, workingBitmap.width, workingBitmap.height, exifMatrix, true)
+                }
                 if (rotated !== workingBitmap) workingBitmap.recycle()
                 workingBitmap = rotated
             }
 
-            // Apply crop, rotation & flip identically to preview
+            // Apply crop, rotation & flip identically to preview without duplicating unchanged 50MP+ frames
             workingBitmap = createOrientedBitmap(
                 source = workingBitmap,
                 crop = snapshot.crop,
@@ -981,7 +1031,7 @@ object PhotoProcessingEngine {
                 recycleSource = true
             )
 
-            // Apply all 17 Tune adjustments + Filter + Intensity identically to preview
+            // Apply all 17 Tune adjustments + Filter + Intensity identically to preview (in-place)
             workingBitmap = processEditedBitmap(
                 source = workingBitmap,
                 adjustments = snapshot.adjustments,
@@ -1032,14 +1082,15 @@ object PhotoProcessingEngine {
                 }
             }
 
-            // Apply configured Watermark from Watermark Studio if enabled
+            // Apply configured Watermark from Watermark Studio if enabled, mutating in-place or recycling source
             val wmConfig = snapshot.watermarkConfig
             if (wmConfig != null && wmConfig.isEnabled) {
                 val watermarked = com.example.util.WatermarkPainter.applyWatermark(
                     source = workingBitmap,
                     config = wmConfig,
                     metadata = photoMetadata,
-                    context = context
+                    context = context,
+                    recycleSource = true
                 )
                 if (watermarked !== workingBitmap) {
                     if (!workingBitmap.isRecycled) workingBitmap.recycle()
@@ -1050,11 +1101,13 @@ object PhotoProcessingEngine {
             }
 
             val timeStamp = SimpleDateFormat("yyyyMMdd_HHmmss_SSS", Locale.US).format(Date())
-            val displayName = "StuDO_Edit_$timeStamp.jpg"
+            val outExtension = if (isPngSource) "png" else "jpg"
+            val outMimeType = if (isPngSource) "image/png" else "image/jpeg"
+            val displayName = "StuDO_Edit_$timeStamp.$outExtension"
 
             val contentValues = ContentValues().apply {
                 put(MediaStore.Images.Media.DISPLAY_NAME, displayName)
-                put(MediaStore.Images.Media.MIME_TYPE, "image/jpeg")
+                put(MediaStore.Images.Media.MIME_TYPE, outMimeType)
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
                     put(MediaStore.Images.Media.RELATIVE_PATH, "Pictures/StuDO_Edited")
                     put(MediaStore.Images.Media.IS_PENDING, 1)
@@ -1069,53 +1122,57 @@ object PhotoProcessingEngine {
                 ) ?: return@withContext null
 
                 context.contentResolver.openOutputStream(savedUri)?.use { outStream ->
-                    workingBitmap.compress(Bitmap.CompressFormat.JPEG, 100, outStream)
+                    val compressFormat = if (isPngSource) Bitmap.CompressFormat.PNG else Bitmap.CompressFormat.JPEG
+                    val ok = workingBitmap.compress(compressFormat, 100, outStream)
                     outStream.flush()
+                    if (!ok) throw IllegalStateException("Compression failed for $savedUri ($outMimeType)")
                 } ?: throw IllegalStateException("Failed to open output stream for $savedUri")
 
-                try {
-                    val pfd = context.contentResolver.openFileDescriptor(savedUri, "rw")
-                    pfd?.use { fd ->
-                        val destExif = ExifInterface(fd.fileDescriptor)
-                        context.contentResolver.openInputStream(sourceUri)?.use { origStream ->
-                            val srcExif = ExifInterface(origStream)
-                            val tagsToCopy = arrayOf(
-                                ExifInterface.TAG_DATETIME,
-                                ExifInterface.TAG_DATETIME_ORIGINAL,
-                                ExifInterface.TAG_DATETIME_DIGITIZED,
-                                ExifInterface.TAG_SUBSEC_TIME_ORIGINAL,
-                                ExifInterface.TAG_MAKE,
-                                ExifInterface.TAG_MODEL,
-                                ExifInterface.TAG_FOCAL_LENGTH,
-                                ExifInterface.TAG_FOCAL_LENGTH_IN_35MM_FILM,
-                                ExifInterface.TAG_F_NUMBER,
-                                ExifInterface.TAG_EXPOSURE_TIME,
-                                ExifInterface.TAG_EXPOSURE_BIAS_VALUE,
-                                ExifInterface.TAG_ISO_SPEED_RATINGS,
-                                ExifInterface.TAG_WHITE_BALANCE,
-                                ExifInterface.TAG_FLASH,
-                                ExifInterface.TAG_GPS_LATITUDE,
-                                ExifInterface.TAG_GPS_LATITUDE_REF,
-                                ExifInterface.TAG_GPS_LONGITUDE,
-                                ExifInterface.TAG_GPS_LONGITUDE_REF,
-                                ExifInterface.TAG_GPS_ALTITUDE,
-                                ExifInterface.TAG_GPS_ALTITUDE_REF,
-                                ExifInterface.TAG_GPS_TIMESTAMP,
-                                ExifInterface.TAG_GPS_DATESTAMP
-                            )
-                            for (tag in tagsToCopy) {
-                                val v = srcExif.getAttribute(tag)
-                                if (!v.isNullOrBlank()) destExif.setAttribute(tag, v)
+                if (!isPngSource) {
+                    try {
+                        val pfd = context.contentResolver.openFileDescriptor(savedUri, "rw")
+                        pfd?.use { fd ->
+                            val destExif = ExifInterface(fd.fileDescriptor)
+                            context.contentResolver.openInputStream(sourceUri)?.use { origStream ->
+                                val srcExif = ExifInterface(origStream)
+                                val tagsToCopy = arrayOf(
+                                    ExifInterface.TAG_DATETIME,
+                                    ExifInterface.TAG_DATETIME_ORIGINAL,
+                                    ExifInterface.TAG_DATETIME_DIGITIZED,
+                                    ExifInterface.TAG_SUBSEC_TIME_ORIGINAL,
+                                    ExifInterface.TAG_MAKE,
+                                    ExifInterface.TAG_MODEL,
+                                    ExifInterface.TAG_FOCAL_LENGTH,
+                                    ExifInterface.TAG_FOCAL_LENGTH_IN_35MM_FILM,
+                                    ExifInterface.TAG_F_NUMBER,
+                                    ExifInterface.TAG_EXPOSURE_TIME,
+                                    ExifInterface.TAG_EXPOSURE_BIAS_VALUE,
+                                    ExifInterface.TAG_ISO_SPEED_RATINGS,
+                                    ExifInterface.TAG_WHITE_BALANCE,
+                                    ExifInterface.TAG_FLASH,
+                                    ExifInterface.TAG_GPS_LATITUDE,
+                                    ExifInterface.TAG_GPS_LATITUDE_REF,
+                                    ExifInterface.TAG_GPS_LONGITUDE,
+                                    ExifInterface.TAG_GPS_LONGITUDE_REF,
+                                    ExifInterface.TAG_GPS_ALTITUDE,
+                                    ExifInterface.TAG_GPS_ALTITUDE_REF,
+                                    ExifInterface.TAG_GPS_TIMESTAMP,
+                                    ExifInterface.TAG_GPS_DATESTAMP
+                                )
+                                for (tag in tagsToCopy) {
+                                    val v = srcExif.getAttribute(tag)
+                                    if (!v.isNullOrBlank()) destExif.setAttribute(tag, v)
+                                }
                             }
+                            destExif.setAttribute(ExifInterface.TAG_ORIENTATION, ExifInterface.ORIENTATION_NORMAL.toString())
+                            destExif.setAttribute(ExifInterface.TAG_IMAGE_WIDTH, finalWidth.toString())
+                            destExif.setAttribute(ExifInterface.TAG_IMAGE_LENGTH, finalHeight.toString())
+                            destExif.setAttribute(ExifInterface.TAG_SOFTWARE, "StuDO Professional Photo Studio")
+                            destExif.saveAttributes()
                         }
-                        destExif.setAttribute(ExifInterface.TAG_ORIENTATION, ExifInterface.ORIENTATION_NORMAL.toString())
-                        destExif.setAttribute(ExifInterface.TAG_IMAGE_WIDTH, finalWidth.toString())
-                        destExif.setAttribute(ExifInterface.TAG_IMAGE_LENGTH, finalHeight.toString())
-                        destExif.setAttribute(ExifInterface.TAG_SOFTWARE, "StuDO Professional Photo Studio")
-                        destExif.saveAttributes()
+                    } catch (ex: Exception) {
+                        android.util.Log.w("PhotoProcessingEngine", "EXIF tag copy note: ${ex.message}")
                     }
-                } catch (ex: Exception) {
-                    android.util.Log.w("PhotoProcessingEngine", "EXIF tag copy note: ${ex.message}")
                 }
 
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
@@ -1133,6 +1190,7 @@ object PhotoProcessingEngine {
                 null
             } finally {
                 if (!workingBitmap.isRecycled) workingBitmap.recycle()
+                com.example.util.WatermarkPainter.clearSampleCache()
             }
         } catch (t: Throwable) {
             android.util.Log.e("PhotoProcessingEngine", "Export exception", t)
@@ -1320,10 +1378,19 @@ object PhotoProcessingEngine {
                                     strokeJoin = Paint.Join.ROUND
                                     strokeWidth = baseStrokePx * 2.1f
                                     color = baseArgb
-                                    alpha = (itemAlpha * 0.45f).roundToInt()
-                                    maskFilter = BlurMaskFilter(baseStrokePx * 0.9f, BlurMaskFilter.Blur.NORMAL)
+                                    alpha = (itemAlpha * 0.35f).roundToInt()
+                                    maskFilter = BlurMaskFilter((baseStrokePx * 0.85f).coerceAtLeast(1f), BlurMaskFilter.Blur.NORMAL)
                                 }
                                 drawCanvas.drawPath(path, glowPaint)
+                                val midHaloPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                                    style = Paint.Style.STROKE
+                                    strokeCap = Paint.Cap.ROUND
+                                    strokeJoin = Paint.Join.ROUND
+                                    strokeWidth = baseStrokePx * 1.4f
+                                    color = baseArgb
+                                    alpha = (itemAlpha * 0.65f).roundToInt()
+                                }
+                                drawCanvas.drawPath(path, midHaloPaint)
                                 val corePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
                                     style = Paint.Style.STROKE
                                     strokeCap = Paint.Cap.ROUND

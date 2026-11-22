@@ -35,24 +35,26 @@ import kotlin.math.roundToInt
 
 object WatermarkPainter {
 
+    @JvmOverloads
     fun applyWatermark(
         source: Bitmap,
         config: WatermarkConfig,
         metadata: RealCameraMetadata,
-        context: Context? = null
+        context: Context? = null,
+        recycleSource: Boolean = false
     ): Bitmap {
         if (!config.isEnabled) return source
 
         return when (config.style) {
-            WatermarkStyle.LEICA_FRAME -> drawLeicaFrame(source, config, metadata, context)
-            WatermarkStyle.GLASS_FRAME -> drawGlassFrame(source, config, metadata, context)
-            WatermarkStyle.HASSELBLAD -> drawHasselbladFrame(source, config, metadata, context)
-            WatermarkStyle.CYBERPUNK -> drawCyberpunkHud(source, config, metadata)
-            WatermarkStyle.RETRO_90S -> drawRetroDateStamp(source, config, metadata)
-            WatermarkStyle.STUDIO_BRAND -> drawStudioBrand(source, config, metadata, context)
-            WatermarkStyle.MINIMAL_SIGNATURE -> drawMinimalSignature(source, config, metadata)
-            WatermarkStyle.METADATA_STRIP -> drawMetadataStrip(source, config, metadata, context)
-            WatermarkStyle.CUSTOM -> drawCustomWatermark(source, config, metadata, context)
+            WatermarkStyle.LEICA_FRAME -> drawLeicaFrame(source, config, metadata, context, recycleSource)
+            WatermarkStyle.GLASS_FRAME -> drawGlassFrame(source, config, metadata, context, recycleSource)
+            WatermarkStyle.HASSELBLAD -> drawHasselbladFrame(source, config, metadata, context, recycleSource)
+            WatermarkStyle.CYBERPUNK -> drawCyberpunkHud(source, config, metadata, recycleSource)
+            WatermarkStyle.RETRO_90S -> drawRetroDateStamp(source, config, metadata, recycleSource)
+            WatermarkStyle.STUDIO_BRAND -> drawStudioBrand(source, config, metadata, context, recycleSource)
+            WatermarkStyle.MINIMAL_SIGNATURE -> drawMinimalSignature(source, config, metadata, recycleSource)
+            WatermarkStyle.METADATA_STRIP -> drawMetadataStrip(source, config, metadata, context, recycleSource)
+            WatermarkStyle.CUSTOM -> drawCustomWatermark(source, config, metadata, context, recycleSource)
         }
     }
 
@@ -67,6 +69,33 @@ object WatermarkPainter {
     ): Bitmap {
         val meta = CameraMetadataUtil.fallbackMetadata(source.width, source.height)
         return applyWatermark(source, config, meta, context)
+    }
+
+    private fun createBitmapOomSafe(width: Int, height: Int): Bitmap {
+        return try {
+            Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
+        } catch (_: OutOfMemoryError) {
+            clearSampleCache()
+            System.gc()
+            Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
+        }
+    }
+
+    private fun obtainMutableTarget(source: Bitmap, recycleSource: Boolean): Bitmap {
+        if (recycleSource && source.isMutable && source.config == Bitmap.Config.ARGB_8888) {
+            return source
+        }
+        val copy = try {
+            source.copy(Bitmap.Config.ARGB_8888, true)
+        } catch (_: OutOfMemoryError) {
+            clearSampleCache()
+            System.gc()
+            source.copy(Bitmap.Config.ARGB_8888, true)
+        }
+        if (recycleSource && copy !== source && !source.isRecycled) {
+            source.recycle()
+        }
+        return copy
     }
 
     private val logoCache = LruCache<String, Bitmap>(16)
@@ -348,7 +377,8 @@ object WatermarkPainter {
         source: Bitmap,
         config: WatermarkConfig,
         metadata: RealCameraMetadata,
-        context: Context?
+        context: Context?,
+        recycleSource: Boolean = false
     ): Bitmap {
         val width = source.width
         val height = source.height
@@ -357,10 +387,11 @@ object WatermarkPainter {
         val pad = proportionalPadding(shortSide, config.paddingDp)
 
         val barHeight = (shortSide * 0.112f * scale).roundToInt().coerceAtLeast(28)
-        val output = Bitmap.createBitmap(width, height + barHeight, Bitmap.Config.ARGB_8888)
+        val output = createBitmapOomSafe(width, height + barHeight)
         val canvas = Canvas(output)
         canvas.drawColor(parseColorSafely(config.backgroundColorHex, Color.WHITE))
         canvas.drawBitmap(source, 0f, 0f, null)
+        if (recycleSource && !source.isRecycled) source.recycle()
 
         val barTop = height.toFloat()
         val centerY = barTop + barHeight / 2f
@@ -487,7 +518,8 @@ object WatermarkPainter {
         source: Bitmap,
         config: WatermarkConfig,
         metadata: RealCameraMetadata,
-        context: Context?
+        context: Context?,
+        recycleSource: Boolean = false
     ): Bitmap {
         val width = source.width
         val height = source.height
@@ -496,10 +528,11 @@ object WatermarkPainter {
         val pad = proportionalPadding(shortSide, config.paddingDp)
 
         val barHeight = (shortSide * 0.118f * scale).roundToInt().coerceAtLeast(28)
-        val output = Bitmap.createBitmap(width, height + barHeight, Bitmap.Config.ARGB_8888)
+        val output = createBitmapOomSafe(width, height + barHeight)
         val canvas = Canvas(output)
         canvas.drawColor(parseColorSafely(config.backgroundColorHex, Color.parseColor("#101115")))
         canvas.drawBitmap(source, 0f, 0f, null)
+        if (recycleSource && !source.isRecycled) source.recycle()
 
         val barTop = height.toFloat()
         val centerY = barTop + barHeight / 2f
@@ -616,9 +649,10 @@ object WatermarkPainter {
     private fun drawCyberpunkHud(
         source: Bitmap,
         config: WatermarkConfig,
-        metadata: RealCameraMetadata
+        metadata: RealCameraMetadata,
+        recycleSource: Boolean = false
     ): Bitmap {
-        val output = source.copy(Bitmap.Config.ARGB_8888, true)
+        val output = obtainMutableTarget(source, recycleSource)
         val canvas = Canvas(output)
         val width = output.width.toFloat()
         val height = output.height.toFloat()
@@ -692,9 +726,10 @@ object WatermarkPainter {
     private fun drawRetroDateStamp(
         source: Bitmap,
         config: WatermarkConfig,
-        metadata: RealCameraMetadata
+        metadata: RealCameraMetadata,
+        recycleSource: Boolean = false
     ): Bitmap {
-        val output = source.copy(Bitmap.Config.ARGB_8888, true)
+        val output = obtainMutableTarget(source, recycleSource)
         val canvas = Canvas(output)
         val width = output.width.toFloat()
         val height = output.height.toFloat()
@@ -811,9 +846,10 @@ object WatermarkPainter {
         source: Bitmap,
         config: WatermarkConfig,
         metadata: RealCameraMetadata,
-        context: Context?
+        context: Context?,
+        recycleSource: Boolean = false
     ): Bitmap {
-        return drawCustomWatermark(source, config, metadata, context)
+        return drawCustomWatermark(source, config, metadata, context, recycleSource)
     }
 
     // -------------------------------------------------------------------------
@@ -822,9 +858,10 @@ object WatermarkPainter {
     private fun drawMinimalSignature(
         source: Bitmap,
         config: WatermarkConfig,
-        metadata: RealCameraMetadata
+        metadata: RealCameraMetadata,
+        recycleSource: Boolean = false
     ): Bitmap {
-        val output = source.copy(Bitmap.Config.ARGB_8888, true)
+        val output = obtainMutableTarget(source, recycleSource)
         val canvas = Canvas(output)
         val width = output.width.toFloat()
         val height = output.height.toFloat()
@@ -908,7 +945,8 @@ object WatermarkPainter {
         source: Bitmap,
         config: WatermarkConfig,
         metadata: RealCameraMetadata,
-        context: Context?
+        context: Context?,
+        recycleSource: Boolean = false
     ): Bitmap {
         val width = source.width
         val height = source.height
@@ -916,10 +954,11 @@ object WatermarkPainter {
         val scale = config.fontSizeScale.coerceIn(0.7f, 2.0f)
         val barHeight = (shortSide * 0.088f * scale).roundToInt().coerceAtLeast(22)
 
-        val output = Bitmap.createBitmap(width, height + barHeight, Bitmap.Config.ARGB_8888)
+        val output = createBitmapOomSafe(width, height + barHeight)
         val canvas = Canvas(output)
         canvas.drawColor(parseColorSafely(config.backgroundColorHex, Color.parseColor("#0A0B0E")))
         canvas.drawBitmap(source, 0f, 0f, null)
+        if (recycleSource && !source.isRecycled) source.recycle()
 
         val barTop = height.toFloat()
         val centerY = barTop + barHeight / 2f
@@ -998,9 +1037,10 @@ object WatermarkPainter {
         source: Bitmap,
         config: WatermarkConfig,
         metadata: RealCameraMetadata,
-        context: Context?
+        context: Context?,
+        recycleSource: Boolean = false
     ): Bitmap {
-        val output = source.copy(Bitmap.Config.ARGB_8888, true)
+        val output = obtainMutableTarget(source, recycleSource)
         val canvas = Canvas(output)
         val width = output.width.toFloat()
         val height = output.height.toFloat()
@@ -1384,7 +1424,8 @@ object WatermarkPainter {
         source: Bitmap,
         config: WatermarkConfig,
         metadata: RealCameraMetadata,
-        context: Context?
+        context: Context?,
+        recycleSource: Boolean = false
     ): Bitmap {
         val width = source.width
         val height = source.height
@@ -1392,7 +1433,7 @@ object WatermarkPainter {
         val scale = config.fontSizeScale.coerceIn(0.7f, 2.0f)
 
         if (config.position != WatermarkPosition.FRAME_BORDER) {
-            return drawFloatingGlassCapsule(source, config, metadata, context)
+            return drawFloatingGlassCapsule(source, config, metadata, context, recycleSource)
         }
 
         // Expand canvas cleanly around the photo so the original subject is never cropped or distorted
@@ -1405,10 +1446,9 @@ object WatermarkPainter {
         val outerRadius = (shortSide * 0.095f).coerceAtLeast(4f)
         val innerRadius = (shortSide * 0.068f).coerceAtLeast(3f)
 
-        val output = Bitmap.createBitmap(outW, outH, Bitmap.Config.ARGB_8888)
-        val canvas = Canvas(output)
-
         val blurredSmall = createFastBlurredBitmap(source, blurRadius = 14)
+        val output = createBitmapOomSafe(outW, outH)
+        val canvas = Canvas(output)
         val blurPaint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG)
         val fullRect = RectF(0f, 0f, outW.toFloat(), outH.toFloat())
 
@@ -1447,6 +1487,7 @@ object WatermarkPainter {
         canvas.save()
         canvas.clipPath(innerPath)
         canvas.drawBitmap(source, marginSide.toFloat(), marginTop.toFloat(), Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG))
+        if (recycleSource && !source.isRecycled) source.recycle()
 
         val innerVignettePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
             style = Paint.Style.STROKE
@@ -1497,12 +1538,13 @@ object WatermarkPainter {
         source: Bitmap,
         config: WatermarkConfig,
         metadata: RealCameraMetadata,
-        context: Context?
+        context: Context?,
+        recycleSource: Boolean = false
     ): Bitmap {
         val width = source.width
         val height = source.height
         val shortSide = minOf(width, height).toFloat()
-        val output = source.copy(Bitmap.Config.ARGB_8888, true)
+        val output = obtainMutableTarget(source, recycleSource)
         val canvas = Canvas(output)
 
         val margin = shortSide * 0.045f * config.marginScale.coerceIn(0.5f, 2.0f)
@@ -1818,26 +1860,39 @@ object WatermarkPainter {
             val origH = bounds.outHeight
             if (origW <= 0 || origH <= 0) return@withContext null
 
+            val detectedMime = bounds.outMimeType ?: context.contentResolver.getType(sourceUri)
+            val isPng = detectedMime.equals("image/png", ignoreCase = true) ||
+                sourceUri.toString().lowercase(Locale.US).endsWith(".png")
+
             var orientation = ExifInterface.ORIENTATION_NORMAL
-            try {
-                context.contentResolver.openInputStream(sourceUri)?.use { stream ->
-                    orientation = ExifInterface(stream).getAttributeInt(
-                        ExifInterface.TAG_ORIENTATION,
-                        ExifInterface.ORIENTATION_NORMAL
-                    )
-                }
-            } catch (_: Exception) {}
+            if (!isPng) {
+                try {
+                    context.contentResolver.openInputStream(sourceUri)?.use { stream ->
+                        orientation = ExifInterface(stream).getAttributeInt(
+                            ExifInterface.TAG_ORIENTATION,
+                            ExifInterface.ORIENTATION_NORMAL
+                        )
+                    }
+                } catch (_: Exception) {}
+            }
+
+            val decodeOpts = BitmapFactory.Options().apply {
+                inSampleSize = 1
+                inScaled = false
+                inMutable = true
+                inPreferredConfig = Bitmap.Config.ARGB_8888
+            }
 
             // Decode full-resolution image, clearing caches safely if heap is tight on huge photos
             rawBmp = try {
                 context.contentResolver.openInputStream(sourceUri)?.use {
-                    BitmapFactory.decodeStream(it)
+                    BitmapFactory.decodeStream(it, null, decodeOpts)
                 }
             } catch (_: OutOfMemoryError) {
                 clearSampleCache()
                 System.gc()
                 context.contentResolver.openInputStream(sourceUri)?.use {
-                    BitmapFactory.decodeStream(it)
+                    BitmapFactory.decodeStream(it, null, decodeOpts)
                 }
             } ?: return@withContext null
 
@@ -1858,7 +1913,13 @@ object WatermarkPainter {
                 }
             }
             uprightBmp = if (!orientMatrix.isIdentity) {
-                val oriented = Bitmap.createBitmap(rawBmp, 0, 0, rawBmp.width, rawBmp.height, orientMatrix, true)
+                val oriented = try {
+                    Bitmap.createBitmap(rawBmp, 0, 0, rawBmp.width, rawBmp.height, orientMatrix, true)
+                } catch (_: OutOfMemoryError) {
+                    clearSampleCache()
+                    System.gc()
+                    Bitmap.createBitmap(rawBmp, 0, 0, rawBmp.width, rawBmp.height, orientMatrix, true)
+                }
                 if (oriented != rawBmp) rawBmp.recycle()
                 oriented
             } else {
@@ -1867,10 +1928,10 @@ object WatermarkPainter {
 
             val meta = CameraMetadataUtil.fromUri(context, sourceUri, uprightBmp.width, uprightBmp.height)
 
-            stamped = applyWatermark(uprightBmp, config, meta, context)
+            stamped = applyWatermark(uprightBmp, config, meta, context, recycleSource = true)
             if (stamped != uprightBmp && !uprightBmp.isRecycled) uprightBmp.recycle()
 
-            return@withContext exportWatermarkedBitmap(context, stamped, config, meta, sourceUri)
+            return@withContext exportWatermarkedBitmap(context, stamped, config, meta, sourceUri, isPng = isPng)
         } catch (_: Throwable) {
             null
         } finally {
@@ -1879,26 +1940,32 @@ object WatermarkPainter {
                 if (uprightBmp != null && uprightBmp != stamped && !uprightBmp.isRecycled) uprightBmp.recycle()
                 if (rawBmp != null && rawBmp != uprightBmp && rawBmp != stamped && !rawBmp.isRecycled) rawBmp.recycle()
             } catch (_: Throwable) {}
+            clearSampleCache()
         }
     }
 
     /**
-     * Saves a watermarked bitmap to MediaStore as a separate copy with EXIF metadata preservation.
+     * Saves a watermarked bitmap to MediaStore as a separate copy with EXIF metadata preservation (for JPEG)
+     * or lossless alpha transparency preservation (for PNG).
      */
+    @JvmOverloads
     suspend fun exportWatermarkedBitmap(
         context: Context,
         bitmap: Bitmap,
         config: WatermarkConfig,
         metadata: RealCameraMetadata,
-        sourceUriForExif: Uri? = null
+        sourceUriForExif: Uri? = null,
+        isPng: Boolean = false
     ): Uri? = withContext(Dispatchers.IO) {
         val timeStamp = SimpleDateFormat("yyyyMMdd_HHmmss_SSS", Locale.US).format(Date())
         val styleTag = config.style.tag.lowercase(Locale.US)
-        val displayName = "StuDO_${styleTag}_$timeStamp.jpg"
+        val extension = if (isPng) "png" else "jpg"
+        val mimeType = if (isPng) "image/png" else "image/jpeg"
+        val displayName = "StuDO_${styleTag}_$timeStamp.$extension"
 
         val contentValues = ContentValues().apply {
             put(MediaStore.Images.Media.DISPLAY_NAME, displayName)
-            put(MediaStore.Images.Media.MIME_TYPE, "image/jpeg")
+            put(MediaStore.Images.Media.MIME_TYPE, mimeType)
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
                 put(MediaStore.Images.Media.RELATIVE_PATH, "Pictures/StuDO_Watermarked")
                 put(MediaStore.Images.Media.IS_PENDING, 1)
@@ -1912,57 +1979,60 @@ object WatermarkPainter {
                 contentValues
             ) ?: return@withContext null
 
-            // Single high-quality JPEG compression pass (quality 100)
+            // Single high-quality compression pass (lossless PNG or JPEG quality 100)
             context.contentResolver.openOutputStream(savedUri)?.use { outStream ->
-                val ok = bitmap.compress(Bitmap.CompressFormat.JPEG, 100, outStream)
+                val format = if (isPng) Bitmap.CompressFormat.PNG else Bitmap.CompressFormat.JPEG
+                val ok = bitmap.compress(format, 100, outStream)
                 outStream.flush()
-                if (!ok) throw IllegalStateException("JPEG compression failed for $savedUri")
+                if (!ok) throw IllegalStateException("${format.name} compression failed for $savedUri")
             } ?: throw IllegalStateException("Failed to open output stream for $savedUri")
 
-            // Preserve authentic EXIF metadata without re-compressing pixel data
-            try {
-                val pfd = context.contentResolver.openFileDescriptor(savedUri, "rw")
-                pfd?.use { fd ->
-                    val destExif = ExifInterface(fd.fileDescriptor)
-                    if (sourceUriForExif != null) {
-                        context.contentResolver.openInputStream(sourceUriForExif)?.use { origStream ->
-                            val srcExif = ExifInterface(origStream)
-                            val tagsToCopy = arrayOf(
-                                ExifInterface.TAG_DATETIME,
-                                ExifInterface.TAG_DATETIME_ORIGINAL,
-                                ExifInterface.TAG_DATETIME_DIGITIZED,
-                                ExifInterface.TAG_SUBSEC_TIME_ORIGINAL,
-                                ExifInterface.TAG_MAKE,
-                                ExifInterface.TAG_MODEL,
-                                "LensMake",
-                                "LensModel",
-                                ExifInterface.TAG_FOCAL_LENGTH,
-                                ExifInterface.TAG_FOCAL_LENGTH_IN_35MM_FILM,
-                                ExifInterface.TAG_F_NUMBER,
-                                ExifInterface.TAG_APERTURE_VALUE,
-                                ExifInterface.TAG_EXPOSURE_TIME,
-                                ExifInterface.TAG_SHUTTER_SPEED_VALUE,
-                                ExifInterface.TAG_EXPOSURE_BIAS_VALUE,
-                                ExifInterface.TAG_ISO_SPEED_RATINGS,
-                                "PhotographicSensitivity",
-                                ExifInterface.TAG_WHITE_BALANCE,
-                                ExifInterface.TAG_FLASH,
-                                ExifInterface.TAG_COLOR_SPACE
-                            )
-                            for (tag in tagsToCopy) {
-                                val v = srcExif.getAttribute(tag)
-                                if (!v.isNullOrBlank()) destExif.setAttribute(tag, v)
+            // Preserve authentic EXIF metadata on JPEG without re-compressing pixel data
+            if (!isPng) {
+                try {
+                    val pfd = context.contentResolver.openFileDescriptor(savedUri, "rw")
+                    pfd?.use { fd ->
+                        val destExif = ExifInterface(fd.fileDescriptor)
+                        if (sourceUriForExif != null) {
+                            context.contentResolver.openInputStream(sourceUriForExif)?.use { origStream ->
+                                val srcExif = ExifInterface(origStream)
+                                val tagsToCopy = arrayOf(
+                                    ExifInterface.TAG_DATETIME,
+                                    ExifInterface.TAG_DATETIME_ORIGINAL,
+                                    ExifInterface.TAG_DATETIME_DIGITIZED,
+                                    ExifInterface.TAG_SUBSEC_TIME_ORIGINAL,
+                                    ExifInterface.TAG_MAKE,
+                                    ExifInterface.TAG_MODEL,
+                                    "LensMake",
+                                    "LensModel",
+                                    ExifInterface.TAG_FOCAL_LENGTH,
+                                    ExifInterface.TAG_FOCAL_LENGTH_IN_35MM_FILM,
+                                    ExifInterface.TAG_F_NUMBER,
+                                    ExifInterface.TAG_APERTURE_VALUE,
+                                    ExifInterface.TAG_EXPOSURE_TIME,
+                                    ExifInterface.TAG_SHUTTER_SPEED_VALUE,
+                                    ExifInterface.TAG_EXPOSURE_BIAS_VALUE,
+                                    ExifInterface.TAG_ISO_SPEED_RATINGS,
+                                    "PhotographicSensitivity",
+                                    ExifInterface.TAG_WHITE_BALANCE,
+                                    ExifInterface.TAG_FLASH,
+                                    ExifInterface.TAG_COLOR_SPACE
+                                )
+                                for (tag in tagsToCopy) {
+                                    val v = srcExif.getAttribute(tag)
+                                    if (!v.isNullOrBlank()) destExif.setAttribute(tag, v)
+                                }
                             }
+                        } else {
+                            metadata.dateTimeFormatted?.let { destExif.setAttribute(ExifInterface.TAG_DATETIME_ORIGINAL, it) }
+                            metadata.manufacturer?.let { destExif.setAttribute(ExifInterface.TAG_MAKE, it) }
+                            metadata.modelOnly?.let { destExif.setAttribute(ExifInterface.TAG_MODEL, it) }
                         }
-                    } else {
-                        metadata.dateTimeFormatted?.let { destExif.setAttribute(ExifInterface.TAG_DATETIME_ORIGINAL, it) }
-                        metadata.manufacturer?.let { destExif.setAttribute(ExifInterface.TAG_MAKE, it) }
-                        metadata.modelOnly?.let { destExif.setAttribute(ExifInterface.TAG_MODEL, it) }
+                        destExif.setAttribute(ExifInterface.TAG_ORIENTATION, ExifInterface.ORIENTATION_NORMAL.toString())
+                        destExif.saveAttributes()
                     }
-                    destExif.setAttribute(ExifInterface.TAG_ORIENTATION, ExifInterface.ORIENTATION_NORMAL.toString())
-                    destExif.saveAttributes()
-                }
-            } catch (_: Exception) {}
+                } catch (_: Exception) {}
+            }
 
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
                 contentValues.clear()

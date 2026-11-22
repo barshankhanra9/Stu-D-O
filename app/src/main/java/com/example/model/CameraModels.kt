@@ -50,6 +50,12 @@ enum class FlashMode(val displayName: String) {
     }
 }
 
+enum class ScreenFlashMode(val displayName: String) {
+    OFF("Off"),
+    AUTO("Auto"),
+    ON("On")
+}
+
 enum class GridOption(val displayName: String, val shortLabel: String) {
     OFF("Off", "OFF"),
     THIRDS("Rule of Thirds", "3×3"),
@@ -816,6 +822,10 @@ data class CameraUiState(
     val flashMode: FlashMode = FlashMode.OFF,
     val isFlashAvailable: Boolean = false,
     val isTorchActive: Boolean = false,
+    val isScreenFlashAvailable: Boolean = false,
+    val screenFlashMode: ScreenFlashMode = ScreenFlashMode.OFF,
+    val isScreenFlashOverlayVisible: Boolean = false,
+    val isScreenFlashLowLightDetected: Boolean = false,
     val zoomRatio: Float = 1.0f,
     val minZoomRatio: Float = 1.0f,
     val maxZoomRatio: Float = 8.0f,

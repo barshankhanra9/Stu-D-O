@@ -611,6 +611,7 @@ fun PhotoEditorPreviewStage(
                                         PreviewTextOverlayChip(
                                             item = item,
                                             isSelected = isSel,
+                                            densityFactor = densityFactor,
                                             scaleDensityFactor = scaleDensityFactor
                                         )
                                     }
@@ -779,6 +780,7 @@ fun PhotoEditorPreviewStage(
 private fun PreviewTextOverlayChip(
     item: TextOverlayItem,
     isSelected: Boolean,
+    densityFactor: Float,
     scaleDensityFactor: Float
 ) {
     val bgStyle = if (!item.hasBackground) TextBackgroundStyle.NONE else item.backgroundStyle
@@ -829,19 +831,19 @@ private fun PreviewTextOverlayChip(
             .background(boxBgColor)
             .then(
                 if (bgStyle == TextBackgroundStyle.OUTLINE) {
-                    Modifier.border((1.8f * scaleDensityFactor).dp, item.color.copy(alpha = item.textOpacity), bgShape)
+                    Modifier.border((2f * scaleDensityFactor).dp, item.color.copy(alpha = item.textOpacity), bgShape)
                 } else {
                     Modifier
                 }
             )
             .padding(
-                horizontal = if (bgStyle == TextBackgroundStyle.PILL) (22f * scaleDensityFactor).dp else (16f * scaleDensityFactor).dp,
-                vertical = (10f * scaleDensityFactor).dp
+                horizontal = if (bgStyle == TextBackgroundStyle.PILL) (24f * scaleDensityFactor).dp else (18f * scaleDensityFactor).dp,
+                vertical = (12f * scaleDensityFactor).dp
             )
             .testTag("preview_text_item_${item.id}"),
         contentAlignment = Alignment.Center
     ) {
-        val fontSizeSp = (item.fontSize * scaleDensityFactor).coerceAtLeast(8f).sp
+        val fontSizeSp = (item.fontSize * scaleDensityFactor).coerceAtLeast(4f).sp
         val styleBase = TextStyle(
             fontFamily = item.fontFamily.toComposeFontFamily(),
             fontSize = fontSizeSp,
@@ -849,7 +851,7 @@ private fun PreviewTextOverlayChip(
             fontStyle = if (item.isItalic) FontStyle.Italic else FontStyle.Normal,
             textAlign = composeAlign,
             letterSpacing = item.letterSpacing.em,
-            lineHeight = fontSizeSp * item.lineSpacing.coerceIn(0.85f, 2.0f)
+            lineHeight = fontSizeSp * item.lineSpacing.coerceIn(0.8f, 2.2f)
         )
 
         Box(contentAlignment = Alignment.Center) {
@@ -858,7 +860,7 @@ private fun PreviewTextOverlayChip(
                     text = item.text,
                     style = styleBase.copy(
                         color = item.outlineColor.copy(alpha = item.textOpacity),
-                        drawStyle = Stroke(width = (item.outlineWidth * scaleDensityFactor * 2f).coerceAtLeast(1f))
+                        drawStyle = Stroke(width = (item.outlineWidth * densityFactor * 2f).coerceAtLeast(1f))
                     )
                 )
             }
@@ -867,7 +869,11 @@ private fun PreviewTextOverlayChip(
                 style = styleBase.copy(
                     color = item.color.copy(alpha = item.textOpacity),
                     shadow = if (item.hasShadow) {
-                        Shadow(color = Color.Black.copy(alpha = 0.65f * item.textOpacity), offset = Offset(0f, 2f * scaleDensityFactor), blurRadius = 6f * scaleDensityFactor)
+                        Shadow(
+                            color = Color.Black.copy(alpha = 0.65f * item.textOpacity),
+                            offset = Offset(0f, 2f * densityFactor),
+                            blurRadius = 6f * densityFactor
+                        )
                     } else null
                 )
             )

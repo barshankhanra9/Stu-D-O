@@ -163,12 +163,14 @@ private fun DrawScope.drawVectorStroke(
     val last = points.last()
     p.lineTo(last.x * totalWidth, last.y * totalHeight)
 
+    val baseStrokePx = strokeWidth * (totalWidth / 400f).coerceAtLeast(1.5f)
+
     if (isEraser) {
         drawPath(
             path = p,
             color = Color.Black,
             blendMode = BlendMode.Clear,
-            style = Stroke(width = strokeWidth, cap = StrokeCap.Round, join = StrokeJoin.Round)
+            style = Stroke(width = baseStrokePx, cap = StrokeCap.Round, join = StrokeJoin.Round)
         )
         return
     }
@@ -179,45 +181,45 @@ private fun DrawScope.drawVectorStroke(
             drawPath(
                 path = p,
                 color = color.copy(alpha = safeOpacity * 0.35f),
-                style = Stroke(width = strokeWidth * 2.1f, cap = StrokeCap.Round, join = StrokeJoin.Round)
+                style = Stroke(width = baseStrokePx * 2.1f, cap = StrokeCap.Round, join = StrokeJoin.Round)
             )
             drawPath(
                 path = p,
                 color = color.copy(alpha = safeOpacity * 0.65f),
-                style = Stroke(width = strokeWidth * 1.4f, cap = StrokeCap.Round, join = StrokeJoin.Round)
+                style = Stroke(width = baseStrokePx * 1.4f, cap = StrokeCap.Round, join = StrokeJoin.Round)
             )
             drawPath(
                 path = p,
                 color = Color.White.copy(alpha = safeOpacity),
-                style = Stroke(width = strokeWidth * 0.72f, cap = StrokeCap.Round, join = StrokeJoin.Round)
+                style = Stroke(width = baseStrokePx * 0.72f, cap = StrokeCap.Round, join = StrokeJoin.Round)
             )
         }
         DrawBrushType.HIGHLIGHTER -> {
             drawPath(
                 path = p,
                 color = color.copy(alpha = (safeOpacity * 0.42f).coerceAtMost(0.45f)),
-                style = Stroke(width = strokeWidth * 1.65f, cap = StrokeCap.Square, join = StrokeJoin.Bevel)
+                style = Stroke(width = baseStrokePx * 1.65f, cap = StrokeCap.Square, join = StrokeJoin.Bevel)
             )
         }
         DrawBrushType.MARKER -> {
             drawPath(
                 path = p,
                 color = color.copy(alpha = safeOpacity * 0.88f),
-                style = Stroke(width = strokeWidth * 1.25f, cap = StrokeCap.Round, join = StrokeJoin.Round)
+                style = Stroke(width = baseStrokePx * 1.25f, cap = StrokeCap.Round, join = StrokeJoin.Round)
             )
         }
         DrawBrushType.CALLIGRAPHY -> {
             drawPath(
                 path = p,
                 color = color.copy(alpha = safeOpacity),
-                style = Stroke(width = strokeWidth * 1.15f, cap = StrokeCap.Butt, join = StrokeJoin.Miter)
+                style = Stroke(width = baseStrokePx * 1.15f, cap = StrokeCap.Butt, join = StrokeJoin.Miter)
             )
         }
         DrawBrushType.PEN -> {
             drawPath(
                 path = p,
                 color = color.copy(alpha = safeOpacity),
-                style = Stroke(width = strokeWidth, cap = StrokeCap.Round, join = StrokeJoin.Round)
+                style = Stroke(width = baseStrokePx, cap = StrokeCap.Round, join = StrokeJoin.Round)
             )
         }
     }

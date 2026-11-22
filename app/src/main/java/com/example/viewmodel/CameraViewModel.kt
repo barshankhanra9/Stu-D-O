@@ -30,6 +30,7 @@ import com.example.model.GridOption
 import com.example.model.MediaItem
 import com.example.model.PhotoDetails
 import com.example.model.RawCaptureMode
+import com.example.model.ScreenFlashMode
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
@@ -43,6 +44,7 @@ import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.flow.updateAndGet
 import com.example.model.SettingsUiState
 import com.example.model.WatermarkPreset
 import com.example.model.toSettingsUiState
@@ -103,6 +105,8 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
     private var recordingTimerJob: Job? = null
     private var countdownJob: Job? = null
     private var galleryRefreshJob: Job? = null
+    private var screenFlashTimeoutJob: Job? = null
+    private val pendingScreenFlashListener = java.util.concurrent.atomic.AtomicReference<ImageCapture.ScreenFlashListener?>(null)
     private var mediaSound: MediaActionSound? = null
     private var developerTapCount = 0
 
@@ -133,6 +137,7 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
                 customTimerSeconds = preferencesRepo.getCustomTimerSeconds(),
                 selectedGrid = preferencesRepo.getGrid(),
                 selectedFilter = preferencesRepo.getFilter(),
+                screenFlashMode = preferencesRepo.getScreenFlashMode(),
                 isLevelIndicatorEnabled = preferencesRepo.isLevelEnabled(),
                 isHistogramEnabled = preferencesRepo.isHistogramEnabled(),
                 isShutterSoundEnabled = preferencesRepo.isShutterSoundEnabled(),
@@ -249,17 +254,13 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
         val expStep = expState.exposureCompensationStep.toFloat()
         val currentExpIndex = expState.exposureCompensationIndex
 
-        // Apply current flash mode to imageCapture if available
-        imageCapture?.flashMode = _uiState.value.flashMode.toCameraXFlashMode()
-
         boundCameraCharacteristicFocalLengthMm = extractCharacteristicFocalLengthMm(camera.cameraInfo)
 
-        _uiState.update {
+        val updatedState = _uiState.updateAndGet {
             it.copy(
                 isCameraReady = true,
                 hasFrontCamera = hasFront,
                 hasBackCamera = hasBack,
-                isFlashAvailable = hasFlash,
                 minZoomRatio = minZoom,
                 maxZoomRatio = maxZoom,
                 zoomRatio = currentZoom,
@@ -275,12 +276,34 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
                 }
             )
         }
+        val isFront = (updatedState.lensFacing == CameraSelector.LENS_FACING_FRONT)
+        applyBoundFlashCapabilities(isFrontLens = isFront, hasHardwareFlash = hasFlash, imageCapture = imageCapture)
         refreshLensCapabilities()
         if (_uiState.value.cameraMode == CameraMode.PRO) {
             applyProSettingsToPreview()
         } else if (_uiState.value.cameraMode == CameraMode.VIDEO) {
             applyVideoSettingsToCamera()
         }
+    }
+
+    internal fun applyBoundFlashCapabilities(
+        isFrontLens: Boolean,
+        hasHardwareFlash: Boolean,
+        imageCapture: ImageCapture? = activeImageCapture
+    ) {
+        val screenFlashAvailable = isFrontLens && !hasHardwareFlash
+        if (!screenFlashAvailable) {
+            dismissScreenFlash()
+        }
+        val updatedState = _uiState.updateAndGet {
+            it.copy(
+                isFlashAvailable = hasHardwareFlash,
+                isScreenFlashAvailable = screenFlashAvailable,
+                isTorchActive = if (hasHardwareFlash) it.isTorchActive else false
+            )
+        }
+        // Apply current effective flash mode (hardware flash or Screen Flash) to imageCapture
+        syncImageCaptureFlashMode(imageCapture, updatedState)
     }
 
     @androidx.annotation.OptIn(androidx.camera.camera2.interop.ExperimentalCamera2Interop::class)
@@ -485,6 +508,7 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
 
     fun setCameraMode(mode: CameraMode) {
         if (_uiState.value.cameraMode != mode) {
+            dismissScreenFlash()
             if (_uiState.value.isRecordingVideo) {
                 stopVideoRecording()
             }
@@ -492,7 +516,7 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
             val cap = capabilityDetector.getCapabilityForLens(isFront)
             val videoSupportedForLens = cap?.isVideoRecordingSupported ?: true
 
-            _uiState.update {
+            val updatedState = _uiState.updateAndGet {
                 it.copy(
                     cameraMode = mode,
                     isCameraReady = false,
@@ -505,6 +529,7 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
                     isVideoRecordingSupported = if (mode == CameraMode.VIDEO) videoSupportedForLens else it.isVideoRecordingSupported
                 )
             }
+            syncImageCaptureFlashMode(state = updatedState)
             if (mode == CameraMode.VIDEO) {
                 _histogramBins.value = emptyList()
             }
@@ -527,6 +552,7 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
         }
 
         if (nextFacing != currentFacing) {
+            dismissScreenFlash()
             liveCaptureFocalLengthMm = null
             boundCameraCharacteristicFocalLengthMm = null
             _histogramBins.value = emptyList()
@@ -534,6 +560,9 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
                 it.copy(
                     lensFacing = nextFacing,
                     isTorchActive = false,
+                    isFlashAvailable = false,
+                    isScreenFlashAvailable = false,
+                    isScreenFlashLowLightDetected = false,
                     isCameraReady = false
                 )
             }
@@ -541,29 +570,146 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
         }
     }
 
+    fun shouldUseScreenFlashForCapture(state: CameraUiState = _uiState.value): Boolean {
+        return !state.isFlashAvailable &&
+            state.isScreenFlashAvailable &&
+            state.cameraMode != CameraMode.VIDEO &&
+            (state.screenFlashMode == ScreenFlashMode.ON ||
+                (state.screenFlashMode == ScreenFlashMode.AUTO && state.isScreenFlashLowLightDetected))
+    }
+
+    fun resolveEffectiveFlashMode(state: CameraUiState = _uiState.value): Int {
+        return when {
+            state.isFlashAvailable -> state.flashMode.toCameraXFlashMode()
+            shouldUseScreenFlashForCapture(state) -> ImageCapture.FLASH_MODE_SCREEN
+            else -> ImageCapture.FLASH_MODE_OFF
+        }
+    }
+
+    private fun syncImageCaptureFlashMode(
+        imageCapture: ImageCapture? = activeImageCapture,
+        state: CameraUiState = _uiState.value
+    ) {
+        val capture = imageCapture ?: return
+        val targetMode = resolveEffectiveFlashMode(state)
+        try {
+            capture.flashMode = targetMode
+        } catch (_: IllegalArgumentException) {
+            if (targetMode == ImageCapture.FLASH_MODE_SCREEN) {
+                try {
+                    capture.flashMode = ImageCapture.FLASH_MODE_OFF
+                } catch (_: Throwable) {}
+            }
+        }
+    }
+
+    fun setScreenFlashMode(mode: ScreenFlashMode) {
+        preferencesRepo.saveScreenFlashMode(mode)
+        val updatedState = _uiState.updateAndGet {
+            it.copy(screenFlashMode = mode)
+        }
+        syncImageCaptureFlashMode(state = updatedState)
+    }
+
+    fun onLowLightConditionChanged(isLowLight: Boolean) {
+        if (_uiState.value.isScreenFlashLowLightDetected == isLowLight) return
+        val updatedState = _uiState.updateAndGet {
+            it.copy(isScreenFlashLowLightDetected = isLowLight)
+        }
+        if (updatedState.isScreenFlashAvailable && updatedState.screenFlashMode == ScreenFlashMode.AUTO) {
+            syncImageCaptureFlashMode(state = updatedState)
+        }
+    }
+
+    fun onScreenFlashApplyRequested(
+        expirationTimeMillis: Long,
+        listener: ImageCapture.ScreenFlashListener
+    ) {
+        if (!_uiState.value.isScreenFlashAvailable ||
+            _uiState.value.isFlashAvailable ||
+            _uiState.value.cameraMode == CameraMode.VIDEO
+        ) {
+            try {
+                listener.onCompleted()
+            } catch (_: Throwable) {}
+            return
+        }
+        pendingScreenFlashListener.getAndSet(listener)?.let { prev ->
+            try {
+                prev.onCompleted()
+            } catch (_: Throwable) {}
+        }
+        screenFlashTimeoutJob?.cancel()
+        val remainingMs = (expirationTimeMillis - System.currentTimeMillis()).coerceIn(250L, 4500L)
+        _uiState.update { it.copy(isScreenFlashOverlayVisible = true) }
+        screenFlashTimeoutJob = viewModelScope.launch {
+            delay(remainingMs)
+            pendingScreenFlashListener.getAndSet(null)?.let { pending ->
+                try {
+                    pending.onCompleted()
+                } catch (_: Throwable) {}
+            }
+            // Failsafe dismiss in case CameraX fails to invoke ScreenFlash.clear() after timeout
+            delay(3000L)
+            _uiState.update { it.copy(isScreenFlashOverlayVisible = false) }
+        }
+    }
+
+    fun onScreenFlashSurfaceReady() {
+        pendingScreenFlashListener.getAndSet(null)?.let { listener ->
+            try {
+                listener.onCompleted()
+            } catch (_: Throwable) {}
+        }
+    }
+
+    fun dismissScreenFlash() {
+        screenFlashTimeoutJob?.cancel()
+        screenFlashTimeoutJob = null
+        pendingScreenFlashListener.getAndSet(null)?.let { listener ->
+            try {
+                listener.onCompleted()
+            } catch (_: Throwable) {}
+        }
+        if (_uiState.value.isScreenFlashOverlayVisible) {
+            _uiState.update { it.copy(isScreenFlashOverlayVisible = false) }
+        }
+    }
+
     fun cycleFlashMode() {
-        if (!_uiState.value.isFlashAvailable) {
-            _uiState.update { it.copy(userMessage = "Flash unavailable on this sensor") }
+        val current = _uiState.value
+        if (current.isFlashAvailable) {
+            val nextMode = when (current.flashMode) {
+                FlashMode.OFF -> FlashMode.AUTO
+                FlashMode.AUTO -> FlashMode.ON
+                FlashMode.ON -> FlashMode.TORCH
+                FlashMode.TORCH -> FlashMode.OFF
+            }
+
+            val enableTorch = (nextMode == FlashMode.TORCH)
+            activeCameraControl?.enableTorch(enableTorch)
+            activeImageCapture?.flashMode = nextMode.toCameraXFlashMode()
+
+            _uiState.update {
+                it.copy(
+                    flashMode = nextMode,
+                    isTorchActive = enableTorch
+                )
+            }
             return
         }
 
-        val nextMode = when (_uiState.value.flashMode) {
-            FlashMode.OFF -> FlashMode.AUTO
-            FlashMode.AUTO -> FlashMode.ON
-            FlashMode.ON -> FlashMode.TORCH
-            FlashMode.TORCH -> FlashMode.OFF
+        if (current.isScreenFlashAvailable && current.cameraMode != CameraMode.VIDEO) {
+            val nextScreenMode = when (current.screenFlashMode) {
+                ScreenFlashMode.OFF -> ScreenFlashMode.AUTO
+                ScreenFlashMode.AUTO -> ScreenFlashMode.ON
+                ScreenFlashMode.ON -> ScreenFlashMode.OFF
+            }
+            setScreenFlashMode(nextScreenMode)
+            return
         }
 
-        val enableTorch = (nextMode == FlashMode.TORCH)
-        activeCameraControl?.enableTorch(enableTorch)
-        activeImageCapture?.flashMode = nextMode.toCameraXFlashMode()
-
-        _uiState.update {
-            it.copy(
-                flashMode = nextMode,
-                isTorchActive = enableTorch
-            )
-        }
+        _uiState.update { it.copy(userMessage = "Flash unavailable on this sensor") }
     }
 
     fun setZoomRatio(ratio: Float) {
@@ -613,6 +759,9 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     fun toggleSettings() {
+        if (!_uiState.value.isSettingsOpen) {
+            dismissScreenFlash()
+        }
         _uiState.update {
             val opening = !it.isSettingsOpen
             it.copy(
@@ -657,6 +806,7 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
     fun cancelCountdown() {
         countdownJob?.cancel()
         countdownJob = null
+        dismissScreenFlash()
         _uiState.update { it.copy(countdownSecondsLeft = null) }
     }
 
@@ -775,7 +925,13 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
             }
         }
 
+        val useScreenFlash = shouldUseScreenFlashForCapture()
+
         viewModelScope.launch {
+            if (useScreenFlash) {
+                _uiState.update { it.copy(isScreenFlashOverlayVisible = true) }
+                delay(260L)
+            }
             if (boundCamInfo != null) {
                 awaitCameraInfoClosed(boundCamInfo)
             }
@@ -811,10 +967,12 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
                     }
                 },
                 onShutterReady = {
+                    dismissScreenFlash()
                     // Sensor closed and released! Rebind viewfinder cleanly and unblock shutter
                     triggerViewfinderRebindOnce(clearCapturing = true)
                 },
                 onSuccess = { mainUri, rawUri ->
+                    dismissScreenFlash()
                     val (actualW, actualH, actualBytes) = mediaCaptureManager.getMediaDimensionsAndSize(mainUri)
                     val actualSize = if (actualW > 0 && actualH > 0) android.util.Size(actualW, actualH) else targetSize
                     val actualMp = (actualSize.width.toDouble() * actualSize.height.toDouble()) / 1_000_000.0
@@ -849,6 +1007,7 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
                     scheduleGalleryRefresh(mediaCaptureManager, actualSize, actualMp, rawUri)
                 },
                 onError = { errorMsg ->
+                    dismissScreenFlash()
                     capabilityDetector.recordCaptureTestResult(
                         cameraId = cap.cameraId,
                         isSuccess = false,
@@ -903,6 +1062,9 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
             } catch (_: Exception) {}
         }
 
+        // Ensure ImageCapture carries latest hardware or Screen Flash mode before capture begins
+        syncImageCaptureFlashMode(imageCapture)
+
         var captureStartedCounted = false
 
         mediaCaptureManager.capturePhoto(
@@ -939,6 +1101,7 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
                 }
             },
             onPhotoSaved = { uri, width, height, bytes ->
+                dismissScreenFlash()
                 val isFrontLens = (_uiState.value.lensFacing == CameraSelector.LENS_FACING_FRONT)
                 val cap = capabilityDetector.getCapabilityForLens(isFrontLens)
                 val targetSize = _uiState.value.targetCaptureSize?.takeIf { it.width > 0 && it.height > 0 }
@@ -972,6 +1135,7 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
                 scheduleGalleryRefresh(mediaCaptureManager, actualSize, actualMp)
             },
             onError = { exc ->
+                dismissScreenFlash()
                 _uiState.update { cur ->
                     val remaining = if (captureStartedCounted) maxOf(0, cur.inFlightCapturesCount - 1) else cur.inFlightCapturesCount
                     cur.copy(
@@ -1278,6 +1442,7 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     fun openPhotoEditor(uri: Uri, isImported: Boolean = false) {
+        dismissScreenFlash()
         cleanupEditorWatermarkTempFiles()
         _uiState.update {
             it.copy(
@@ -1711,6 +1876,7 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     fun openWatermarkStudio() {
+        dismissScreenFlash()
         val presets = preferencesRepo.getWatermarkPresets()
         _uiState.update {
             it.copy(
@@ -2644,6 +2810,7 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     fun onCameraHardwareError(message: String, isFatal: Boolean = false) {
+        dismissScreenFlash()
         if (isFatal && (_uiState.value.isRecordingVideo || activeRecording != null)) {
             stopVideoRecording()
         }
@@ -2659,6 +2826,7 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
 
     override fun onCleared() {
         super.onCleared()
+        dismissScreenFlash()
         focusResetJob?.cancel()
         recordingTimerJob?.cancel()
         countdownJob?.cancel()

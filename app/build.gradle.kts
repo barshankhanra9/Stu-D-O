@@ -151,16 +151,25 @@ dependencies {
 }
 
 tasks.withType<Test>().configureEach {
-  // Configure Robolectric runtime dependency resolver to use Maven Central remote repository
-  systemProperty("robolectric.dependency.repo.id", "mavenCentral")
-  systemProperty("robolectric.dependency.repo.url", "https://repo1.maven.org/maven2/")
-
-  // If pre-cached Android 16 instrumented runtime jar exists locally, provide its directory dynamically
   val userHome = System.getProperty("user.home") ?: ""
-  val localSdkDir = file("$userHome/.m2/repository/org/robolectric/android-all-instrumented/16-robolectric-13921718-i7")
-  val localJar = file("$localSdkDir/android-all-instrumented-16-robolectric-13921718-i7.jar")
-  if (localJar.exists() && localJar.length() > 0) {
+  val candidateSdkDirs = listOf(
+    file("$userHome/.m2/repository/org/robolectric/android-all-instrumented/16-robolectric-13921718-i7"),
+    file("/home/appuser/.m2/repository/org/robolectric/android-all-instrumented/16-robolectric-13921718-i7")
+  )
+  val localSdkDir = candidateSdkDirs.firstOrNull { dir ->
+    val jar = file("${dir.absolutePath}/android-all-instrumented-16-robolectric-13921718-i7.jar")
+    jar.exists() && jar.length() > 0
+  }
+  if (localSdkDir != null) {
+    val localRepoDir = localSdkDir.parentFile.parentFile.parentFile.parentFile
+    systemProperty("robolectric.offline", "true")
     systemProperty("robolectric.dependency.dir", localSdkDir.absolutePath)
+    systemProperty("robolectric.dependency.repo.id", "local")
+    systemProperty("robolectric.dependency.repo.url", localRepoDir.toURI().toString())
+    systemProperty("maven.repo.local", localRepoDir.absolutePath)
+  } else {
+    systemProperty("robolectric.dependency.repo.id", "mavenCentral")
+    systemProperty("robolectric.dependency.repo.url", "https://repo1.maven.org/maven2/")
   }
 }
 

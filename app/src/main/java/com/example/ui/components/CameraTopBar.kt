@@ -62,6 +62,7 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
@@ -69,6 +70,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
+import com.example.R
 import com.example.model.CameraFilter
 import com.example.model.CameraMode
 import com.example.model.CameraUiState
@@ -78,6 +80,7 @@ import com.example.model.FlashMode
 import com.example.model.GridOption
 import com.example.model.PhotoResolution
 import com.example.model.RawCaptureMode
+import com.example.model.ScreenFlashMode
 import com.example.model.VideoQualityOption
 import com.example.ui.theme.GlassCoolBlueSpecular
 import com.example.ui.theme.GlassObsidianBottom
@@ -679,12 +682,34 @@ fun CameraTopBar(
                     )
                 }
 
-                // Flash button in liquid glass chip
-                val flashActive = uiState.flashMode != FlashMode.OFF
+                // Flash / Front Screen Flash button in liquid glass chip
+                val isScreenFlashMode = !uiState.isFlashAvailable && uiState.isScreenFlashAvailable
+                val canToggleFlash = (uiState.isFlashAvailable || uiState.isScreenFlashAvailable) && !uiState.isRecordingVideo
+                val flashActive = when {
+                    uiState.isFlashAvailable -> uiState.flashMode != FlashMode.OFF
+                    uiState.isScreenFlashAvailable -> uiState.screenFlashMode != ScreenFlashMode.OFF
+                    else -> false
+                }
+                val flashAccentColor = if (isScreenFlashMode) Color(0xFFFFE5B4) else StuDOAmber
                 val flashIconColor by animateColorAsState(
-                    targetValue = if (flashActive) StuDOAmber else StuDOSilver,
+                    targetValue = when {
+                        !canToggleFlash && !(uiState.isFlashAvailable || uiState.isScreenFlashAvailable) -> StuDOSilverMuted.copy(alpha = 0.40f)
+                        isScreenFlashMode && flashActive -> Color(0xFFFFF3D6)
+                        flashActive -> StuDOAmber
+                        uiState.isFlashAvailable || uiState.isScreenFlashAvailable -> StuDOSilver
+                        else -> StuDOSilverMuted.copy(alpha = 0.40f)
+                    },
                     label = "flash_icon"
                 )
+                val flashContentDescription = if (isScreenFlashMode) {
+                    when (uiState.screenFlashMode) {
+                        ScreenFlashMode.OFF -> stringResource(R.string.screen_flash_cd_off)
+                        ScreenFlashMode.AUTO -> stringResource(R.string.screen_flash_cd_auto)
+                        ScreenFlashMode.ON -> stringResource(R.string.screen_flash_cd_on)
+                    }
+                } else {
+                    stringResource(R.string.flash_cd_mode, uiState.flashMode.displayName)
+                }
 
                 Box(
                     modifier = Modifier
@@ -692,29 +717,52 @@ fun CameraTopBar(
                             shape = RoundedCornerShape(14.dp),
                             cornerRadius = 14.dp,
                             isActive = flashActive,
-                            isEnabled = uiState.isFlashAvailable && !uiState.isRecordingVideo,
-                            accentColor = StuDOAmber
+                            isEnabled = canToggleFlash,
+                            accentColor = flashAccentColor,
+                            activeFillAlpha = if (isScreenFlashMode) 0.24f else 0.16f
                         )
                         .clickable(
-                            enabled = uiState.isFlashAvailable && !uiState.isRecordingVideo,
+                            enabled = canToggleFlash,
                             onClick = onCycleFlash
                         )
                         .padding(horizontal = 7.dp, vertical = 4.dp)
                         .testTag("flash_toggle_button"),
                     contentAlignment = Alignment.Center
                 ) {
-                    val icon = when (uiState.flashMode) {
-                        FlashMode.AUTO -> Icons.Default.FlashAuto
-                        FlashMode.ON -> Icons.Default.FlashOn
-                        FlashMode.OFF -> Icons.Default.FlashOff
-                        FlashMode.TORCH -> Icons.Default.Highlight
+                    val icon = if (isScreenFlashMode) {
+                        when (uiState.screenFlashMode) {
+                            ScreenFlashMode.AUTO -> Icons.Default.FlashAuto
+                            ScreenFlashMode.ON -> Icons.Default.FlashOn
+                            ScreenFlashMode.OFF -> Icons.Default.FlashOff
+                        }
+                    } else {
+                        when (uiState.flashMode) {
+                            FlashMode.AUTO -> Icons.Default.FlashAuto
+                            FlashMode.ON -> Icons.Default.FlashOn
+                            FlashMode.OFF -> Icons.Default.FlashOff
+                            FlashMode.TORCH -> Icons.Default.Highlight
+                        }
                     }
-                    Icon(
-                        imageVector = icon,
-                        contentDescription = "Flash mode: ${uiState.flashMode.displayName}",
-                        tint = if (uiState.isFlashAvailable) flashIconColor else StuDOSilverMuted.copy(alpha = 0.40f),
-                        modifier = Modifier.size(14.dp)
-                    )
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(2.dp)
+                    ) {
+                        Icon(
+                            imageVector = icon,
+                            contentDescription = flashContentDescription,
+                            tint = flashIconColor,
+                            modifier = Modifier.size(14.dp)
+                        )
+                        if (isScreenFlashMode && flashActive) {
+                            Text(
+                                text = stringResource(R.string.screen_flash_badge),
+                                color = flashIconColor,
+                                fontSize = 8.sp,
+                                fontWeight = FontWeight.Bold,
+                                modifier = Modifier.testTag("screen_flash_mode_badge")
+                            )
+                        }
+                    }
                 }
 
                 // Settings button (compact Box avoids M3 48dp forced hitbox overlap with flash toggle)

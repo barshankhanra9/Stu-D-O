@@ -91,6 +91,7 @@ import com.example.model.CameraUiState
 import com.example.model.CaptureAspectRatio
 import com.example.model.CapturePriority
 import com.example.model.GridOption
+import com.example.model.ScreenFlashMode
 import com.example.model.VideoCodecOption
 import com.example.model.VideoFpsOption
 import com.example.model.VideoQualityOption
@@ -139,6 +140,7 @@ private class ViewfinderSessionHolder {
     val isBackdropActive = AtomicBoolean(false)
     val isFrontCamera = AtomicBoolean(false)
     val isGestureBlocked = AtomicBoolean(false)
+    val isScreenFlashOverlayActive = AtomicBoolean(false)
     var isSurfaceProviderAttached: Boolean = false
 
     fun currentlyBoundUseCases(): List<androidx.camera.core.UseCase> {
@@ -297,6 +299,9 @@ fun CameraViewfinder(
     onHistogramData: (List<Float>) -> Unit = {},
     onActiveLensFocalLengthChanged: (Float?, String?) -> Unit = { _, _ -> },
     onFullScreenAspectRatioChanged: (Float) -> Unit = {},
+    onLowLightChanged: (Boolean) -> Unit = {},
+    onScreenFlashApplyRequested: (Long, ImageCapture.ScreenFlashListener) -> Unit = { _, listener -> listener.onCompleted() },
+    onScreenFlashClearRequested: () -> Unit = {},
     orientationState: kotlinx.coroutines.flow.StateFlow<com.example.model.DeviceOrientationState>? = null,
     modifier: Modifier = Modifier
 ) {
@@ -316,6 +321,9 @@ fun CameraViewfinder(
     val latestOnHistogramData by rememberUpdatedState(onHistogramData)
     val latestOnActiveLensFocalLengthChanged by rememberUpdatedState(onActiveLensFocalLengthChanged)
     val latestOnFullScreenAspectRatioChanged by rememberUpdatedState(onFullScreenAspectRatioChanged)
+    val latestOnLowLightChanged by rememberUpdatedState(onLowLightChanged)
+    val latestOnScreenFlashApplyRequested by rememberUpdatedState(onScreenFlashApplyRequested)
+    val latestOnScreenFlashClearRequested by rememberUpdatedState(onScreenFlashClearRequested)
 
     val isOverlayBlocking = uiState.isSettingsOpen ||
         uiState.isWatermarkStudioOpen ||
@@ -347,11 +355,23 @@ fun CameraViewfinder(
         session.isBackdropActive.set(isFramedBackdropWanted)
         session.isFrontCamera.set(uiState.lensFacing == CameraSelector.LENS_FACING_FRONT)
         session.isGestureBlocked.set(isOverlayBlocking)
+        session.isScreenFlashOverlayActive.set(uiState.isScreenFlashOverlayVisible)
     }
 
-    // Flash dip animation on capture
+    LaunchedEffect(uiState.isScreenFlashOverlayVisible) {
+        if (uiState.isScreenFlashOverlayVisible && shutterAlpha.value > 0f) {
+            shutterAlpha.snapTo(0f)
+        }
+    }
+
+    // Flash dip animation on capture (suppressed when Screen Flash illumination is active)
     LaunchedEffect(uiState.shutterFlashTrigger) {
-        if (uiState.shutterFlashTrigger > 0L) {
+        val state = latestUiState
+        val isScreenFlashCapture = state.isScreenFlashOverlayVisible ||
+            (!state.isFlashAvailable && state.isScreenFlashAvailable &&
+                (state.screenFlashMode == ScreenFlashMode.ON ||
+                    (state.screenFlashMode == ScreenFlashMode.AUTO && state.isScreenFlashLowLightDetected)))
+        if (uiState.shutterFlashTrigger > 0L && !isScreenFlashCapture) {
             shutterAlpha.snapTo(0.85f)
             shutterAlpha.animateTo(
                 targetValue = 0f,
@@ -937,9 +957,15 @@ fun CameraViewfinder(
                     attachActiveLensCaptureCallback(
                         previewBuilder = previewBuilder,
                         mainExecutor = mainExecutor,
+                        session = session,
                         onFocalChanged = { focalMm, physicalId ->
                             if (!session.isDisposed.get()) {
                                 latestOnActiveLensFocalLengthChanged(focalMm, physicalId)
+                            }
+                        },
+                        onLowLightChanged = { isLowLight ->
+                            if (!session.isDisposed.get()) {
+                                latestOnLowLightChanged(isLowLight)
                             }
                         }
                     )
@@ -959,13 +985,56 @@ fun CameraViewfinder(
                         ImageCapture.CAPTURE_MODE_MAXIMIZE_QUALITY
                     }
 
+                    val selectorHasFlash = try {
+                        cameraProvider.getCameraInfo(selector).hasFlashUnit()
+                    } catch (_: Throwable) {
+                        snapshotState.isFlashAvailable
+                    }
+                    val canScreenFlash = targetBindingRequest.core.lensFacing == CameraSelector.LENS_FACING_FRONT && !selectorHasFlash
+                    val screenFlashImpl = if (canScreenFlash) {
+                        object : ImageCapture.ScreenFlash {
+                            override fun apply(
+                                expirationTimeMillis: Long,
+                                screenFlashListener: ImageCapture.ScreenFlashListener
+                            ) {
+                                mainExecutor.execute {
+                                    if (session.isDisposed.get()) {
+                                        screenFlashListener.onCompleted()
+                                    } else {
+                                        latestOnScreenFlashApplyRequested(expirationTimeMillis, screenFlashListener)
+                                    }
+                                }
+                            }
+
+                            override fun clear() {
+                                mainExecutor.execute {
+                                    latestOnScreenFlashClearRequested()
+                                }
+                            }
+                        }
+                    } else {
+                        null
+                    }
+                    val initialFlashMode = when {
+                        selectorHasFlash -> snapshotState.flashMode.toCameraXFlashMode()
+                        canScreenFlash && (snapshotState.screenFlashMode == ScreenFlashMode.ON ||
+                            (snapshotState.screenFlashMode == ScreenFlashMode.AUTO && snapshotState.isScreenFlashLowLightDetected)) ->
+                            ImageCapture.FLASH_MODE_SCREEN
+                        else -> ImageCapture.FLASH_MODE_OFF
+                    }
+
                     val targetSize = targetBindingRequest.core.targetCaptureSize?.takeIf { it.width > 0 && it.height > 0 }
                     val jpegQuality = if (snapshotState.capturePriority == CapturePriority.QUALITY) 100 else 95
                     val imageCaptureBuilder = ImageCapture.Builder()
                         .setCaptureMode(captureMode)
                         .setJpegQuality(jpegQuality)
                         .setTargetRotation(displayRotation)
-                        .setFlashMode(snapshotState.flashMode.toCameraXFlashMode())
+                        .apply {
+                            if (screenFlashImpl != null) {
+                                setScreenFlash(screenFlashImpl)
+                            }
+                        }
+                        .setFlashMode(initialFlashMode)
 
                     if (targetSize != null) {
                         val is16_9Capture = targetBindingRequest.core.aspectRatio == CaptureAspectRatio.RATIO_16_9 ||
@@ -1075,7 +1144,12 @@ fun CameraViewfinder(
                                 .setCaptureMode(captureMode)
                                 .setJpegQuality(jpegQuality)
                                 .setTargetRotation(displayRotation)
-                                .setFlashMode(snapshotState.flashMode.toCameraXFlashMode())
+                                .apply {
+                                    if (screenFlashImpl != null) {
+                                        setScreenFlash(screenFlashImpl)
+                                    }
+                                }
+                                .setFlashMode(initialFlashMode)
                                 .setResolutionSelector(defaultAspectResolutionSelector)
                                 .build()
                             val fallbackCam = cameraProvider.bindToLifecycle(
@@ -1347,17 +1421,22 @@ fun CameraViewfinder(
 private fun attachActiveLensCaptureCallback(
     previewBuilder: Preview.Builder,
     mainExecutor: java.util.concurrent.Executor,
-    onFocalChanged: (Float?, String?) -> Unit
+    session: ViewfinderSessionHolder,
+    onFocalChanged: (Float?, String?) -> Unit,
+    onLowLightChanged: (Boolean) -> Unit
 ) {
     var hasReportedInitial = false
     var lastFocalMm: Float? = null
     var lastPhysicalId: String? = null
+    var hasReportedLowLight = false
+    var lastLowLight = false
+    var pendingLowLightStreak = 0
 
     androidx.camera.camera2.interop.Camera2Interop.Extender(previewBuilder)
         .setSessionCaptureCallback(
             object : android.hardware.camera2.CameraCaptureSession.CaptureCallback() {
                 override fun onCaptureCompleted(
-                    session: android.hardware.camera2.CameraCaptureSession,
+                    captureSession: android.hardware.camera2.CameraCaptureSession,
                     request: android.hardware.camera2.CaptureRequest,
                     result: android.hardware.camera2.TotalCaptureResult
                 ) {
@@ -1377,6 +1456,36 @@ private fun attachActiveLensCaptureCallback(
                         lastPhysicalId = activePhysicalId
                         mainExecutor.execute {
                             onFocalChanged(focalMm, activePhysicalId)
+                        }
+                    }
+
+                    // Evaluate AE state & exposure telemetry for Screen Flash Auto mode when screen flash isn't currently illuminating
+                    if (!session.isScreenFlashOverlayActive.get()) {
+                        val aeState = result.get(android.hardware.camera2.CaptureResult.CONTROL_AE_STATE)
+                        val exposureNs = result.get(android.hardware.camera2.CaptureResult.SENSOR_EXPOSURE_TIME) ?: 0L
+                        val iso = result.get(android.hardware.camera2.CaptureResult.SENSOR_SENSITIVITY) ?: 0
+                        val frameLowLight = aeState == android.hardware.camera2.CaptureResult.CONTROL_AE_STATE_FLASH_REQUIRED ||
+                            (exposureNs >= 33_000_000L && iso >= 600) ||
+                            exposureNs >= 55_000_000L
+
+                        if (!hasReportedLowLight) {
+                            hasReportedLowLight = true
+                            lastLowLight = frameLowLight
+                            pendingLowLightStreak = 0
+                            mainExecutor.execute {
+                                onLowLightChanged(frameLowLight)
+                            }
+                        } else if (frameLowLight != lastLowLight) {
+                            pendingLowLightStreak++
+                            if (pendingLowLightStreak >= 6) {
+                                lastLowLight = frameLowLight
+                                pendingLowLightStreak = 0
+                                mainExecutor.execute {
+                                    onLowLightChanged(frameLowLight)
+                                }
+                            }
+                        } else {
+                            pendingLowLightStreak = 0
                         }
                     }
                 }
