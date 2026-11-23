@@ -1,9 +1,16 @@
 package com.example.ui.components
 
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.animateContentSize
 import androidx.compose.animation.core.Spring
 import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.spring
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.expandHorizontally
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.shrinkHorizontally
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -13,6 +20,7 @@ import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.defaultMinSize
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -24,6 +32,7 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
@@ -47,6 +56,8 @@ import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.input.pointer.positionChange
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
@@ -58,6 +69,7 @@ import com.example.ui.theme.StuDOAmber
 import com.example.ui.theme.StuDOFocusYellow
 import com.example.ui.theme.StuDOSilver
 import com.example.ui.theme.StuDOWhite
+import kotlinx.coroutines.delay
 import java.util.Locale
 import kotlin.math.PI
 import kotlin.math.abs
@@ -115,19 +127,55 @@ fun CurvedZoomControl(
     maxZoomRatio: Float,
     hapticsEnabled: Boolean,
     onZoomChange: (Float) -> Unit,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    forceCompactPill: Boolean = false,
+    idleCollapseDelayMs: Long = 3500L,
+    modeKey: Any? = null
 ) {
     val haptic = rememberStuDOHaptic(hapticsEnabled)
     val canZoom = maxZoomRatio > minZoomRatio + 0.05f
 
     var isGestureArcActive by remember { mutableStateOf(false) }
     var isPinnedArcActive by remember { mutableStateOf(false) }
+    var isIdleCollapsed by remember { mutableStateOf(false) }
+    var interactionTick by remember { mutableIntStateOf(0) }
+
+    val isCompactPill = forceCompactPill || isIdleCollapsed
     val isArcVisible = canZoom && (isGestureArcActive || isPinnedArcActive)
+
+    // Reset transient zoom state cleanly when switching camera modes or dense panels
+    LaunchedEffect(forceCompactPill, modeKey) {
+        isPinnedArcActive = false
+        isGestureArcActive = false
+        isIdleCollapsed = false
+        interactionTick++
+    }
+
+    // In Photo/Video mode (not forceCompactPill), auto-collapse preset strip into small pill after inactivity
+    LaunchedEffect(
+        forceCompactPill,
+        isIdleCollapsed,
+        isGestureArcActive,
+        isPinnedArcActive,
+        interactionTick,
+        idleCollapseDelayMs
+    ) {
+        if (!forceCompactPill &&
+            !isIdleCollapsed &&
+            !isGestureArcActive &&
+            !isPinnedArcActive &&
+            idleCollapseDelayMs > 0L
+        ) {
+            delay(idleCollapseDelayMs)
+            isIdleCollapsed = true
+        }
+    }
 
     val latestZoom by rememberUpdatedState(zoomRatio)
     val latestMinZoom by rememberUpdatedState(minZoomRatio)
     val latestMaxZoom by rememberUpdatedState(maxZoomRatio)
     val latestOnZoomChange by rememberUpdatedState(onZoomChange)
+    val latestForceCompactPill by rememberUpdatedState(forceCompactPill)
 
     val arcProgress by animateFloatAsState(
         targetValue = if (isArcVisible) 1f else 0f,
@@ -217,84 +265,138 @@ fun CurvedZoomControl(
 
                     if (enteredArc) {
                         isGestureArcActive = false
+                        if (!latestForceCompactPill) {
+                            isIdleCollapsed = false
+                        }
+                        interactionTick++
                     }
                 }
             },
         contentAlignment = Alignment.BottomCenter
     ) {
-        // 1. Compact Idle Liquid Glass Zoom Pill
+        // 1. Dynamic Liquid Glass Zoom Pill (full preset strip or single compact zoom pill)
         if (pillAlpha > 0.02f) {
             val presets = remember(minZoomRatio, maxZoomRatio) {
                 computeDynamicZoomPresets(minZoomRatio, maxZoomRatio)
             }
 
             Row(
-                horizontalArrangement = Arrangement.spacedBy(4.dp),
+                horizontalArrangement = Arrangement.Center,
                 verticalAlignment = Alignment.CenterVertically,
                 modifier = Modifier
                     .alpha(pillAlpha)
                     .scale(0.92f + 0.08f * pillAlpha)
+                    .animateContentSize(
+                        animationSpec = spring(
+                            dampingRatio = 0.80f,
+                            stiffness = Spring.StiffnessMedium
+                        )
+                    )
                     .liquidGlassRecessedTrack(
                         shape = RoundedCornerShape(24.dp),
                         cornerRadius = 24.dp,
                         coolHighlightAlpha = 0.30f,
                         warmHighlightAlpha = 0.20f
                     )
-                    .padding(horizontal = 5.dp, vertical = 4.dp)
+                    .padding(
+                        horizontal = if (isCompactPill) 4.dp else 5.dp,
+                        vertical = 4.dp
+                    )
                     .testTag("zoom_chips_strip")
             ) {
-                presets.forEach { preset ->
-                    val isSelected = abs(zoomRatio - preset) < 0.15f
-                    val beadScale by animateFloatAsState(
-                        targetValue = if (isSelected) 1f else 0.94f,
-                        animationSpec = spring(dampingRatio = 0.72f, stiffness = Spring.StiffnessMedium),
-                        label = "zoom_chip_scale"
+                AnimatedVisibility(
+                    visible = !isCompactPill,
+                    enter = fadeIn(tween(180)) + expandHorizontally(
+                        animationSpec = spring(
+                            dampingRatio = 0.82f,
+                            stiffness = Spring.StiffnessMedium
+                        ),
+                        expandFrom = Alignment.Start
+                    ),
+                    exit = fadeOut(tween(140)) + shrinkHorizontally(
+                        animationSpec = spring(
+                            dampingRatio = 0.86f,
+                            stiffness = Spring.StiffnessMedium
+                        ),
+                        shrinkTowards = Alignment.End
                     )
-                    val chipModifier = if (isSelected) {
-                        Modifier
-                            .scale(beadScale)
-                            .liquidGlassSurface(
-                                shape = CircleShape,
-                                cornerRadius = 14.dp,
-                                topColor = Color.White.copy(alpha = 0.21f),
-                                bottomColor = GlassObsidianBottom.copy(alpha = 0.84f),
-                                borderWidth = 0.8.dp,
-                                coolHighlightAlpha = 0.44f,
-                                warmHighlightAlpha = 0.28f,
-                                specularSheenAlpha = 0.20f,
-                                internalShadowAlpha = 0.28f
-                            )
-                    } else {
-                        Modifier.clip(CircleShape)
-                    }
-
-                    Box(
-                        modifier = chipModifier
-                            .clickable(enabled = !isGestureArcActive) {
-                                if (!isSelected) haptic.tick()
-                                isPinnedArcActive = false
-                                onZoomChange(preset)
-                            }
-                            .padding(horizontal = 10.dp, vertical = 4.dp),
-                        contentAlignment = Alignment.Center
+                ) {
+                    Row(
+                        horizontalArrangement = Arrangement.spacedBy(4.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier
+                            .padding(end = 4.dp)
+                            .testTag("zoom_presets_row")
                     ) {
-                        val label = when {
-                            preset < 1.0f -> String.format(Locale.US, "%.1f", preset)
-                            abs(preset - preset.roundToInt()) < 0.05f -> "${preset.roundToInt()}"
-                            else -> String.format(Locale.US, "%.1f", preset)
+                        presets.forEach { preset ->
+                            val isSelected = abs(zoomRatio - preset) < 0.15f
+                            val beadScale by animateFloatAsState(
+                                targetValue = if (isSelected) 1f else 0.94f,
+                                animationSpec = spring(dampingRatio = 0.72f, stiffness = Spring.StiffnessMedium),
+                                label = "zoom_chip_scale"
+                            )
+                            val chipModifier = if (isSelected) {
+                                Modifier
+                                    .scale(beadScale)
+                                    .liquidGlassSurface(
+                                        shape = CircleShape,
+                                        cornerRadius = 14.dp,
+                                        topColor = Color.White.copy(alpha = 0.21f),
+                                        bottomColor = GlassObsidianBottom.copy(alpha = 0.84f),
+                                        borderWidth = 0.8.dp,
+                                        coolHighlightAlpha = 0.44f,
+                                        warmHighlightAlpha = 0.28f,
+                                        specularSheenAlpha = 0.20f,
+                                        internalShadowAlpha = 0.28f
+                                    )
+                            } else {
+                                Modifier.clip(CircleShape)
+                            }
+
+                            val label = when {
+                                preset < 1.0f -> String.format(Locale.US, "%.1f", preset)
+                                abs(preset - preset.roundToInt()) < 0.05f -> "${preset.roundToInt()}"
+                                else -> String.format(Locale.US, "%.1f", preset)
+                            }
+
+                            Box(
+                                modifier = chipModifier
+                                    .clickable(enabled = !isGestureArcActive && !isCompactPill) {
+                                        if (!isSelected) haptic.tick()
+                                        isPinnedArcActive = false
+                                        interactionTick++
+                                        onZoomChange(preset)
+                                    }
+                                    .padding(horizontal = 10.dp, vertical = 4.dp)
+                                    .testTag("zoom_preset_$label"),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Text(
+                                    text = label,
+                                    color = if (isSelected) StuDOFocusYellow else StuDOSilver.copy(alpha = 0.78f),
+                                    fontSize = 12.sp,
+                                    fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium
+                                )
+                            }
                         }
-                        Text(
-                            text = label,
-                            color = if (isSelected) StuDOFocusYellow else StuDOSilver.copy(alpha = 0.78f),
-                            fontSize = 12.sp,
-                            fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium
-                        )
                     }
                 }
 
-                // Live magnification readout pill (tapping toggles fine curved arc; drag/hold anywhere also opens arc)
-                Box(
-                    modifier = Modifier
+                // Live magnification readout pill:
+                // - In dense secondary panels (Portrait/Pro): only curved zoom works (tap or drag opens arc)
+                // - In Photo/Video idle-collapsed pill: tap wakes preset strip, drag/hold opens curved arc
+                // - In Photo/Video expanded strip: tap toggles curved arc, drag/hold opens curved arc
+                val readoutLabel = "${String.format(Locale.US, "%.1f", zoomRatio)}x"
+                val readoutModifier = if (isCompactPill) {
+                    Modifier
+                        .defaultMinSize(minWidth = 48.dp)
+                        .clip(CircleShape)
+                        .background(
+                            if (isPinnedArcActive) StuDOAmber.copy(alpha = 0.22f) else Color.Transparent
+                        )
+                        .padding(horizontal = 10.dp, vertical = 4.dp)
+                } else {
+                    Modifier
                         .liquidGlassChipSurface(
                             shape = CircleShape,
                             cornerRadius = 14.dp,
@@ -304,19 +406,40 @@ fun CurvedZoomControl(
                             inactiveBottomAlpha = 0.16f,
                             activeFillAlpha = 0.22f
                         )
-                        .clickable(enabled = canZoom && !isGestureArcActive) {
-                            haptic.tick()
-                            isPinnedArcActive = !isPinnedArcActive
-                        }
                         .padding(horizontal = 8.dp, vertical = 4.dp)
+                }
+
+                Box(
+                    modifier = Modifier
+                        .semantics { contentDescription = "Zoom $readoutLabel" }
+                        .clickable(enabled = !isGestureArcActive && (canZoom || (!forceCompactPill && isIdleCollapsed))) {
+                            haptic.tick()
+                            interactionTick++
+                            if (forceCompactPill) {
+                                if (canZoom) {
+                                    isPinnedArcActive = !isPinnedArcActive
+                                }
+                            } else if (isIdleCollapsed) {
+                                isIdleCollapsed = false
+                            } else {
+                                if (canZoom) {
+                                    isPinnedArcActive = !isPinnedArcActive
+                                }
+                            }
+                        }
+                        .then(readoutModifier)
                         .testTag("zoom_live_readout"),
                     contentAlignment = Alignment.Center
                 ) {
                     Text(
-                        text = "${String.format(Locale.US, "%.1f", zoomRatio)}x",
-                        color = if (isPinnedArcActive) StuDOAmber else StuDOWhite.copy(alpha = 0.88f),
-                        fontSize = 11.sp,
-                        fontWeight = FontWeight.SemiBold
+                        text = readoutLabel,
+                        color = when {
+                            isPinnedArcActive -> StuDOAmber
+                            isCompactPill -> StuDOFocusYellow
+                            else -> StuDOWhite.copy(alpha = 0.88f)
+                        },
+                        fontSize = if (isCompactPill) 12.sp else 11.sp,
+                        fontWeight = if (isCompactPill) FontWeight.Bold else FontWeight.SemiBold
                     )
                 }
             }
@@ -351,6 +474,7 @@ fun CurvedZoomControl(
                                     latestOnZoomChange(nextZoom)
                                 }
                             }
+                            interactionTick++
                         }
                     }
                     .testTag("curved_zoom_arc"),
@@ -361,7 +485,10 @@ fun CurvedZoomControl(
                     minZoomRatio = minZoomRatio,
                     maxZoomRatio = maxZoomRatio,
                     arcProgress = arcProgress,
-                    onCollapse = { isPinnedArcActive = false }
+                    onCollapse = {
+                        isPinnedArcActive = false
+                        interactionTick++
+                    }
                 )
             }
         }

@@ -639,4 +639,127 @@ class LiquidGlassUiTest {
         composeTestRule.waitForIdle()
         assertEquals(CameraFilter.NATURAL, state.selectedFilter)
     }
+
+    @Test
+    fun `dense secondary panels in Portrait and Pro modes collapse zoom strip into compact curved-zoom-only pill`() {
+        var state by mutableStateOf(
+            CameraUiState(
+                cameraMode = CameraMode.PHOTO,
+                isCameraReady = true,
+                zoomRatio = 1.0f,
+                minZoomRatio = 0.5f,
+                maxZoomRatio = 8.0f
+            )
+        )
+
+        composeTestRule.setContent {
+            Box(modifier = Modifier.fillMaxSize()) {
+                CameraBottomBar(
+                    uiState = state,
+                    onCaptureClick = {},
+                    onModeSelect = { state = state.copy(cameraMode = it) },
+                    onToggleLens = {},
+                    onZoomChange = { state = state.copy(zoomRatio = it) },
+                    onThumbnailClick = {}
+                )
+            }
+        }
+
+        // Photo mode initially shows full preset strip + live readout
+        composeTestRule.onNodeWithTag("zoom_presets_row").assertIsDisplayed()
+        composeTestRule.onNodeWithTag("zoom_preset_2").assertIsDisplayed()
+        composeTestRule.onNodeWithTag("zoom_live_readout").assertIsDisplayed()
+
+        // Switch to Portrait mode (aperture/depth panel) -> presets collapse into single compact pill
+        composeTestRule.onNodeWithTag("mode_portrait_button").performClick()
+        composeTestRule.waitForIdle()
+        assertEquals(CameraMode.PORTRAIT, state.cameraMode)
+        composeTestRule.onNodeWithTag("zoom_presets_row").assertDoesNotExist()
+        composeTestRule.onNodeWithTag("zoom_live_readout").assertIsDisplayed()
+        composeTestRule.onNodeWithText("1.0x").assertIsDisplayed()
+
+        // Tapping compact pill in Portrait mode opens curved zoom arc directly (only curved zoom works)
+        composeTestRule.onNodeWithTag("zoom_live_readout").performClick()
+        composeTestRule.waitForIdle()
+        composeTestRule.onNodeWithTag("curved_zoom_arc").assertIsDisplayed()
+
+        // Collapsing curved arc keeps it as single compact pill (never re-expands presets)
+        composeTestRule.onNodeWithTag("curved_zoom_droplet").performClick()
+        composeTestRule.waitForIdle()
+        composeTestRule.onNodeWithTag("curved_zoom_arc").assertDoesNotExist()
+        composeTestRule.onNodeWithTag("zoom_presets_row").assertDoesNotExist()
+        composeTestRule.onNodeWithTag("zoom_live_readout").assertIsDisplayed()
+
+        // Dragging compact pill adjusts zoom via curved zoom
+        composeTestRule.onNodeWithTag("zoom_chips_strip").performTouchInput {
+            down(0, center)
+            moveBy(0, Offset(60f, 0f))
+            moveBy(0, Offset(60f, 0f))
+            up(0)
+        }
+        composeTestRule.waitForIdle()
+        assertTrue("Expected zoom > 1.0f after dragging compact pill, got ${state.zoomRatio}", state.zoomRatio > 1.0f)
+        composeTestRule.onNodeWithTag("zoom_presets_row").assertDoesNotExist()
+
+        // Switch to Pro mode -> stays collapsed into single compact pill
+        composeTestRule.onNodeWithTag("mode_pro_button").performClick()
+        composeTestRule.waitForIdle()
+        assertEquals(CameraMode.PRO, state.cameraMode)
+        composeTestRule.onNodeWithTag("zoom_presets_row").assertDoesNotExist()
+        composeTestRule.onNodeWithTag("zoom_live_readout").assertIsDisplayed()
+
+        // Switch to Video mode -> full preset strip restored
+        composeTestRule.onNodeWithTag("mode_video_button").performClick()
+        composeTestRule.waitForIdle()
+        assertEquals(CameraMode.VIDEO, state.cameraMode)
+        composeTestRule.onNodeWithTag("zoom_presets_row").assertIsDisplayed()
+        composeTestRule.onNodeWithTag("zoom_live_readout").assertIsDisplayed()
+    }
+
+    @Test
+    fun `photo and video zoom strip auto-collapses into small pill after inactivity and expands on tap`() {
+        var zoom by mutableFloatStateOf(1.0f)
+
+        composeTestRule.setContent {
+            Box(modifier = Modifier.fillMaxSize()) {
+                CurvedZoomControl(
+                    zoomRatio = zoom,
+                    minZoomRatio = 0.5f,
+                    maxZoomRatio = 8.0f,
+                    hapticsEnabled = false,
+                    onZoomChange = { zoom = it },
+                    forceCompactPill = false,
+                    idleCollapseDelayMs = 1500L,
+                    modeKey = CameraMode.PHOTO
+                )
+            }
+        }
+
+        // Initially expanded with presets
+        composeTestRule.onNodeWithTag("zoom_presets_row").assertIsDisplayed()
+        composeTestRule.onNodeWithTag("zoom_live_readout").assertIsDisplayed()
+
+        // Advance time past idle delay without touching -> transforms to small pill
+        composeTestRule.mainClock.advanceTimeBy(1600L)
+        composeTestRule.waitForIdle()
+        composeTestRule.onNodeWithTag("zoom_presets_row").assertDoesNotExist()
+        composeTestRule.onNodeWithTag("zoom_live_readout").assertIsDisplayed()
+        composeTestRule.onNodeWithText("1.0x").assertIsDisplayed()
+
+        // Tapping the small pill in Photo/Video mode expands the full strip again
+        composeTestRule.onNodeWithTag("zoom_live_readout").performClick()
+        composeTestRule.waitForIdle()
+        composeTestRule.onNodeWithTag("zoom_presets_row").assertIsDisplayed()
+        composeTestRule.onNodeWithTag("zoom_preset_2").performClick()
+        composeTestRule.waitForIdle()
+        assertEquals(2.0f, zoom, 0.01f)
+
+        // Pinning curved zoom arc prevents auto-collapse while arc is open
+        composeTestRule.onNodeWithTag("zoom_live_readout").performClick()
+        composeTestRule.waitForIdle()
+        composeTestRule.onNodeWithTag("curved_zoom_arc").assertIsDisplayed()
+        composeTestRule.mainClock.advanceTimeBy(2000L)
+        composeTestRule.waitForIdle()
+        composeTestRule.onNodeWithTag("curved_zoom_arc").assertIsDisplayed()
+    }
 }

@@ -78,7 +78,9 @@ class MediaCaptureManager(private val context: Context) {
         portraitFocusY: Float? = null,
         portraitDepthFrameProvider: (() -> com.example.portrait.HardwareDepthFrame?)? = null,
         portraitSidecarStorage: com.example.portrait.PortraitSidecarStorage? = null,
-        onPortraitProcessed: ((com.example.model.PortraitDepthSource, Int) -> Unit)? = null,
+        portraitPipelineManager: com.example.portrait.PortraitPipelineManager? = null,
+        isPortraitOemBokehCapture: Boolean = false,
+        onPortraitProcessed: ((com.example.model.PortraitDepthSource, Int, com.example.model.PortraitCaptureTier) -> Unit)? = null,
         onCaptureStarted: () -> Unit = {},
         onShutterReady: () -> Unit = {},
         onPhotoSaved: (Uri, Int, Int, Long) -> Unit,
@@ -161,6 +163,8 @@ class MediaCaptureManager(private val context: Context) {
                                 portraitFocusY = portraitFocusY,
                                 portraitDepthFrameProvider = portraitDepthFrameProvider,
                                 portraitSidecarStorage = portraitSidecarStorage,
+                                portraitPipelineManager = portraitPipelineManager,
+                                isPortraitOemBokehCapture = isPortraitOemBokehCapture,
                                 onPortraitProcessed = onPortraitProcessed,
                                 onComplete = { uri, w, h, bytes ->
                                     mainHandler.post {
@@ -218,7 +222,9 @@ class MediaCaptureManager(private val context: Context) {
         portraitFocusY: Float? = null,
         portraitDepthFrameProvider: (() -> com.example.portrait.HardwareDepthFrame?)? = null,
         portraitSidecarStorage: com.example.portrait.PortraitSidecarStorage? = null,
-        onPortraitProcessed: ((com.example.model.PortraitDepthSource, Int) -> Unit)? = null,
+        portraitPipelineManager: com.example.portrait.PortraitPipelineManager? = null,
+        isPortraitOemBokehCapture: Boolean = false,
+        onPortraitProcessed: ((com.example.model.PortraitDepthSource, Int, com.example.model.PortraitCaptureTier) -> Unit)? = null,
         onComplete: (Uri, Int, Int, Long) -> Unit,
         onFailure: (ImageCaptureException) -> Unit
     ) {
@@ -324,10 +330,19 @@ class MediaCaptureManager(private val context: Context) {
                 }
 
                 context.contentResolver.openInputStream(savedUri)?.use { input ->
+                    val portraitSampleSize = if (isPortraitMode && rawBoundsW > 0 && rawBoundsH > 0) {
+                        com.example.portrait.PortraitPipelineManager.computePortraitDecodeSampleSize(
+                            rawWidth = rawBoundsW,
+                            rawHeight = rawBoundsH
+                        )
+                    } else {
+                        1
+                    }
                     val decodeOpts = BitmapFactory.Options().apply {
                         inPreferredConfig = Bitmap.Config.ARGB_8888
                         inScaled = false
                         inMutable = true
+                        inSampleSize = portraitSampleSize
                     }
                     originalBitmap = BitmapFactory.decodeStream(input, null, decodeOpts)
                     val original = originalBitmap
@@ -382,55 +397,96 @@ class MediaCaptureManager(private val context: Context) {
                             )
                         }
 
-                        // Step 2.5: Portrait Mode segmentation, non-destructive sidecar preservation & depth-graded optical bokeh
+                        // Step 2.5: Portrait Mode ~12MP resolution cap + 4-tier capture waterfall & sidecar preservation
                         if (isPortraitMode) {
-                            val preBokehBmp = currentBitmap!!
-                            val hwDepth = try {
-                                portraitDepthFrameProvider?.invoke()
-                            } catch (_: Throwable) {
-                                null
+                            val activePrePortrait = currentBitmap!!
+                            val cappedBmp = com.example.portrait.PortraitPipelineManager.capPortraitResolution(
+                                bitmap = activePrePortrait,
+                                maxLongestEdge = com.example.portrait.PortraitPipelineManager.MAX_PORTRAIT_EDGE_PX
+                            )
+                            if (cappedBmp !== activePrePortrait && activePrePortrait != original) {
+                                activePrePortrait.recycle()
                             }
-                            val segmentation = com.example.portrait.PortraitSegmentationEngine.segmentBitmap(
-                                uprightBitmap = preBokehBmp,
-                                isPreviewStream = false,
-                                focusX = portraitFocusX,
-                                focusY = portraitFocusY,
-                                hardwareDepthFrame = hwDepth
-                            )
-                            val rawMeta = photoMetadata ?: com.example.util.CameraMetadataUtil.fromUri(
-                                context, savedUri, preBokehBmp.width, preBokehBmp.height
-                            )
-                            val metaWithLens = com.example.util.CameraMetadataUtil.withActiveFocalLengthIfMissing(
-                                rawMeta, activeFocalLengthMm
-                            )
-                            val wmCfgForSidecar = watermarkConfig ?: com.example.model.WatermarkConfig(isEnabled = false)
-                            savedSidecarEntry = portraitSidecarStorage?.savePortraitSidecar(
-                                cleanUprightBitmap = preBokehBmp,
-                                segmentation = segmentation,
-                                blurIntensity = portraitBlurIntensity,
-                                focusX = portraitFocusX ?: 0.5f,
-                                focusY = portraitFocusY ?: 0.45f,
-                                exifAttributes = exifAttributes,
-                                metadata = metaWithLens,
-                                watermarkConfig = wmCfgForSidecar,
-                                isSaveLocation = isSaveLocation
-                            )
+                            currentBitmap = cappedBmp
 
-                            val bokehBmp = com.example.portrait.PortraitBokehRenderer.renderFullResolutionPortrait(
-                                originalUpright = preBokehBmp,
-                                segmentation = segmentation,
-                                options = com.example.portrait.BokehRenderOptions(
-                                    blurIntensity = portraitBlurIntensity,
+                            if (isPortraitOemBokehCapture) {
+                                // Tier 1: CameraX ExtensionMode.BOKEH already rendered bokeh directly on sensor/HAL
+                                portraitPipelineManager?.executeCaptureWaterfall(
+                                    uprightBitmap = cappedBmp,
+                                    isOemExtensionCapture = true,
                                     focusX = portraitFocusX,
                                     focusY = portraitFocusY
                                 )
-                            )
-                            if (bokehBmp !== preBokehBmp && preBokehBmp != original) {
-                                preBokehBmp.recycle()
-                            }
-                            currentBitmap = bokehBmp
-                            onPortraitProcessed?.let { cb ->
-                                mainHandler.post { cb(segmentation.source, segmentation.subjectCount) }
+                                onPortraitProcessed?.let { cb ->
+                                    mainHandler.post {
+                                        cb(
+                                            com.example.model.PortraitDepthSource.HYBRID,
+                                            1,
+                                            com.example.model.PortraitCaptureTier.CAMERA_X_BOKEH
+                                        )
+                                    }
+                                }
+                            } else {
+                                val waterfallResult = portraitPipelineManager?.executeCaptureWaterfall(
+                                    uprightBitmap = cappedBmp,
+                                    isOemExtensionCapture = false,
+                                    focusX = portraitFocusX,
+                                    focusY = portraitFocusY,
+                                    hardwareDepthProvider = portraitDepthFrameProvider
+                                )
+                                val segmentation = waterfallResult?.segmentation
+                                    ?: com.example.portrait.PortraitSegmentationEngine.segmentBitmap(
+                                        uprightBitmap = cappedBmp,
+                                        isPreviewStream = false,
+                                        focusX = portraitFocusX,
+                                        focusY = portraitFocusY,
+                                        hardwareDepthFrame = try {
+                                            portraitDepthFrameProvider?.invoke()
+                                        } catch (_: Throwable) {
+                                            null
+                                        }
+                                    )
+                                val rawMeta = photoMetadata ?: com.example.util.CameraMetadataUtil.fromUri(
+                                    context, savedUri, cappedBmp.width, cappedBmp.height
+                                )
+                                val metaWithLens = com.example.util.CameraMetadataUtil.withActiveFocalLengthIfMissing(
+                                    rawMeta, activeFocalLengthMm
+                                )
+                                val wmCfgForSidecar = watermarkConfig ?: com.example.model.WatermarkConfig(isEnabled = false)
+                                savedSidecarEntry = portraitSidecarStorage?.savePortraitSidecar(
+                                    cleanUprightBitmap = cappedBmp,
+                                    segmentation = segmentation,
+                                    blurIntensity = portraitBlurIntensity,
+                                    focusX = portraitFocusX ?: 0.5f,
+                                    focusY = portraitFocusY ?: 0.45f,
+                                    exifAttributes = exifAttributes,
+                                    metadata = metaWithLens,
+                                    watermarkConfig = wmCfgForSidecar,
+                                    isSaveLocation = isSaveLocation
+                                )
+
+                                val bokehBmp = com.example.portrait.PortraitBokehRenderer.renderFullResolutionPortrait(
+                                    originalUpright = cappedBmp,
+                                    segmentation = segmentation,
+                                    options = com.example.portrait.BokehRenderOptions(
+                                        blurIntensity = portraitBlurIntensity,
+                                        focusX = portraitFocusX,
+                                        focusY = portraitFocusY
+                                    )
+                                )
+                                if (bokehBmp !== cappedBmp && cappedBmp != original) {
+                                    cappedBmp.recycle()
+                                }
+                                currentBitmap = bokehBmp
+                                onPortraitProcessed?.let { cb ->
+                                    mainHandler.post {
+                                        cb(
+                                            segmentation.source,
+                                            segmentation.subjectCount,
+                                            segmentation.captureTier
+                                        )
+                                    }
+                                }
                             }
                         }
 

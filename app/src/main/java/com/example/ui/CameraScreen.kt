@@ -537,6 +537,9 @@ fun CameraScreen(
             val onNormalizedFocusPoint = remember(viewModel) {
                 { nx: Float, ny: Float -> viewModel.setPortraitFocusPoint(nx, ny) }
             }
+            val onPortraitOemExtensionChanged = remember(viewModel) {
+                { active: Boolean -> viewModel.onPortraitExtensionBindingChanged(active) }
+            }
 
             // Live Viewfinder (CameraX Preview + Gestures + Framing Grid + Level + Filters + Portrait Live Bokeh)
             CameraViewfinder(
@@ -558,7 +561,9 @@ fun CameraScreen(
                 onScreenFlashApplyRequested = onScreenFlashApplyRequested,
                 onScreenFlashClearRequested = onScreenFlashClearRequested,
                 onPortraitStatusUpdate = onPortraitStatusUpdate,
-                onNormalizedFocusPoint = onNormalizedFocusPoint
+                onNormalizedFocusPoint = onNormalizedFocusPoint,
+                portraitPipelineManager = viewModel.portraitPipelineManager,
+                onPortraitOemExtensionChanged = onPortraitOemExtensionChanged
             )
 
             val isFullScreenModalOpen = uiState.isSettingsOpen ||

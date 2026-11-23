@@ -28,4 +28,10 @@
     <string name="portrait_editor_update">Update Photo</string>
     <string name="portrait_editor_save_copy">Save Copy</string>
     <string name="portrait_editor_original_preserved">Original unblurred image preserved safely</string>
+    <string name="portrait_watchdog_badge">Portrait blur applied on capture</string>
+    <string name="portrait_tier_oem_bokeh">OEM Bokeh</string>
+    <string name="portrait_tier_hw_depth">DEPTH16</string>
+    <string name="portrait_tier_subject_ai">Subject AI</string>
+    <string name="portrait_tier_selfie_offline">Offline AI</string>
+    <string name="portrait_model_downloading">Preparing Subject AI %1$d%%</string>
 </resources>

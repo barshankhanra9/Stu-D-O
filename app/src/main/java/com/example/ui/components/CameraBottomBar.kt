@@ -120,13 +120,19 @@ fun CameraBottomBar(
             horizontalAlignment = Alignment.CenterHorizontally,
             modifier = Modifier.fillMaxWidth()
         ) {
-            // Dynamic Liquid Glass Zoom Pill -> Curved Glass Zoom Arc on touch-and-hold / drag
+            // Dynamic Liquid Glass Zoom Pill -> Curved Glass Zoom Arc on touch-and-hold / drag.
+            // Collapses into a single compact curved-zoom-only pill when Portrait or Pro panels are open,
+            // and auto-collapses after inactivity in Photo / Video modes.
+            val isDenseSecondaryPanelOpen = uiState.cameraMode == CameraMode.PORTRAIT ||
+                uiState.cameraMode == CameraMode.PRO
             CurvedZoomControl(
                 zoomRatio = uiState.zoomRatio,
                 minZoomRatio = uiState.minZoomRatio,
                 maxZoomRatio = uiState.maxZoomRatio,
                 hapticsEnabled = uiState.isHapticFeedbackEnabled,
-                onZoomChange = onZoomChange
+                onZoomChange = onZoomChange,
+                forceCompactPill = isDenseSecondaryPanelOpen,
+                modeKey = uiState.cameraMode
             )
 
             Spacer(modifier = Modifier.height(10.dp))

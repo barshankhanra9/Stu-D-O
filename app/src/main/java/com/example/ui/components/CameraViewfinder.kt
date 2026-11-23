@@ -91,14 +91,16 @@ import com.example.model.CameraUiState
 import com.example.model.CaptureAspectRatio
 import com.example.model.CapturePriority
 import com.example.model.GridOption
+import com.example.model.PortraitCaptureTier
 import com.example.model.PortraitDepthSource
+import com.example.model.PortraitPreviewStrategy
 import com.example.model.PortraitQualityTier
 import com.example.model.ScreenFlashMode
 import com.example.model.VideoCodecOption
 import com.example.model.VideoFpsOption
 import com.example.model.VideoQualityOption
-import com.example.portrait.PortraitBokehRenderer
-import com.example.portrait.PortraitSegmentationEngine
+import com.example.portrait.PortraitLiveBlurGLSurfaceView
+import com.example.portrait.PortraitPipelineManager
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withTimeoutOrNull
@@ -113,6 +115,7 @@ private data class CameraCoreBindingConfig(
     val lensFacing: Int,
     val aspectRatio: CaptureAspectRatio,
     val isVideoMode: Boolean,
+    val isPortraitMode: Boolean,
     val capturePriority: CapturePriority?,
     val videoQuality: VideoQualityOption?,
     val videoFps: VideoFpsOption?,
@@ -315,6 +318,8 @@ fun CameraViewfinder(
     onScreenFlashClearRequested: () -> Unit = {},
     onPortraitStatusUpdate: ((Boolean, Int, PortraitDepthSource, PortraitQualityTier) -> Unit)? = null,
     onNormalizedFocusPoint: ((Float, Float) -> Unit)? = null,
+    portraitPipelineManager: PortraitPipelineManager? = null,
+    onPortraitOemExtensionChanged: (Boolean) -> Unit = {},
     orientationState: kotlinx.coroutines.flow.StateFlow<com.example.model.DeviceOrientationState>? = null,
     modifier: Modifier = Modifier
 ) {
@@ -322,6 +327,7 @@ fun CameraViewfinder(
     val lifecycleOwner = LocalLifecycleOwner.current
 
     var previewViewInstance by remember { mutableStateOf<PreviewView?>(null) }
+    var glPortraitViewInstance by remember { mutableStateOf<PortraitLiveBlurGLSurfaceView?>(null) }
     val session = remember { ViewfinderSessionHolder() }
     val shutterAlpha = remember { Animatable(0f) }
 
@@ -339,6 +345,8 @@ fun CameraViewfinder(
     val latestOnScreenFlashClearRequested by rememberUpdatedState(onScreenFlashClearRequested)
     val latestOnPortraitStatusUpdate by rememberUpdatedState(onPortraitStatusUpdate)
     val latestOnNormalizedFocusPoint by rememberUpdatedState(onNormalizedFocusPoint)
+    val latestPortraitPipelineManager by rememberUpdatedState(portraitPipelineManager)
+    val latestOnPortraitOemExtensionChanged by rememberUpdatedState(onPortraitOemExtensionChanged)
 
     val isOverlayBlocking = uiState.isSettingsOpen ||
         uiState.isWatermarkStudioOpen ||
@@ -353,7 +361,6 @@ fun CameraViewfinder(
         (context.getSystemService(Context.ACTIVITY_SERVICE) as? ActivityManager)?.isLowRamDevice == true
     }
     var blurredBackdropBitmap by remember { mutableStateOf<Bitmap?>(null) }
-    var portraitOverlayBitmap by remember { mutableStateOf<Bitmap?>(null) }
     val isFramedBackdropWanted = !isVideoMode &&
         uiState.aspectRatio != CaptureAspectRatio.RATIO_FULL &&
         !shouldPausePreview &&
@@ -363,16 +370,13 @@ fun CameraViewfinder(
         uiState.cameraMode == CameraMode.PORTRAIT &&
         !shouldPausePreview &&
         uiState.isStreaming
+    val isGlPortraitBlurVisible = isPortraitWanted &&
+        uiState.portraitPreviewStrategy == PortraitPreviewStrategy.UNIVERSAL_GL_SHADER &&
+        !uiState.isPortraitLiveBlurPausedByWatchdog
 
     LaunchedEffect(isFramedBackdropWanted) {
         if (!isFramedBackdropWanted) {
             blurredBackdropBitmap = null
-        }
-    }
-
-    LaunchedEffect(isPortraitWanted) {
-        if (!isPortraitWanted) {
-            portraitOverlayBitmap = null
         }
     }
 
@@ -689,6 +693,12 @@ fun CameraViewfinder(
                     if (previewViewInstance != previewView) {
                         previewViewInstance = previewView
                     }
+                    // Hide PreviewView via INVISIBLE (retaining SurfaceTexture + meteringPointFactory)
+                    // only when the OpenGL ES 2.0 Portrait Bokeh shader surface is actively rendering.
+                    val targetPreviewVisibility = if (isGlPortraitBlurVisible) View.INVISIBLE else View.VISIBLE
+                    if (previewView.visibility != targetPreviewVisibility) {
+                        previewView.visibility = targetPreviewVisibility
+                    }
                     // On API < 31 (where Compose RenderEffect is unavailable), apply ColorMatrixColorFilter
                     // directly on PreviewView's internal TextureView hardware layer so live filters still render.
                     val fallbackFilter = if (!shouldPausePreview && liveFilterEffect.composeRenderEffect == null) {
@@ -714,24 +724,76 @@ fun CameraViewfinder(
                 }
             )
 
+            // Universal OpenGL ES 2.0 Live Portrait Blur Surface (mounted ONLY in Portrait Mode when
+            // ExtensionMode.BOKEH is unavailable and the FPS watchdog has not paused live blur).
+            if (uiState.cameraMode == CameraMode.PORTRAIT) {
+                AndroidView(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .testTag("portrait_gl_live_blur_surface"),
+                    factory = { ctx ->
+                        PortraitLiveBlurGLSurfaceView(ctx).apply {
+                            layoutParams = ViewGroup.LayoutParams(
+                                ViewGroup.LayoutParams.MATCH_PARENT,
+                                ViewGroup.LayoutParams.MATCH_PARENT
+                            )
+                            visibility = View.GONE
+                            onFrameRenderedListener = { _ ->
+                                latestPortraitPipelineManager?.notifyGlFrameRendered {
+                                    runOnMainThreadSafe {
+                                        clearBuffers()
+                                        onPause()
+                                        visibility = View.GONE
+                                        previewViewInstance?.visibility = View.VISIBLE
+                                    }
+                                }
+                            }
+                            glPortraitViewInstance = this
+                        }
+                    },
+                    update = { glView ->
+                        if (glPortraitViewInstance != glView) {
+                            glPortraitViewInstance = glView
+                        }
+                        if (isGlPortraitBlurVisible) {
+                            if (glView.visibility != View.VISIBLE) {
+                                glView.visibility = View.VISIBLE
+                                glView.onResume()
+                            }
+                            glView.updateRenderParams(
+                                blurIntensity = uiState.portraitBlurIntensity,
+                                filter = uiState.selectedFilter,
+                                isFrontCamera = uiState.lensFacing == CameraSelector.LENS_FACING_FRONT
+                            )
+                        } else {
+                            if (glView.visibility != View.GONE) {
+                                glView.clearBuffers()
+                                glView.onPause()
+                                glView.visibility = View.GONE
+                            }
+                        }
+                    }
+                )
+                DisposableEffect(Unit) {
+                    onDispose {
+                        glPortraitViewInstance?.let { glView ->
+                            glView.clearBuffers()
+                            glView.onPause()
+                            glView.visibility = View.GONE
+                        }
+                        glPortraitViewInstance = null
+                    }
+                }
+            }
+
             // Skip GPU/Compose viewfinder HUD overlays while full-screen modal screens cover the preview
             if (!shouldPausePreview) {
-                // Real-time DSLR-style background blur overlay (subject regions remain transparent so PreviewView shines through)
-                val portraitOverlay = portraitOverlayBitmap
-                if (isPortraitWanted && portraitOverlay != null && !portraitOverlay.isRecycled) {
-                    Image(
-                        bitmap = portraitOverlay.asImageBitmap(),
-                        contentDescription = null,
-                        contentScale = ContentScale.Crop,
-                        modifier = Modifier
-                            .fillMaxSize()
-                            .testTag("viewfinder_portrait_bokeh_overlay")
-                    )
-                }
-
-                // Only draw calibrated Compose atmosphere overlay on fallback API < 33 paths;
-                // API 33+ AGSL RuntimeShader renders split-toning & vignette directly per-pixel on GPU.
-                if (uiState.selectedFilter != CameraFilter.NATURAL && !liveFilterEffect.isFullShaderActive) {
+                // Only draw calibrated Compose atmosphere overlay on fallback API < 33 paths
+                // when GL Portrait shader isn't already applying filter color grading & vignette.
+                if (uiState.selectedFilter != CameraFilter.NATURAL &&
+                    !liveFilterEffect.isFullShaderActive &&
+                    !isGlPortraitBlurVisible
+                ) {
                     FilterAtmosphereOverlay(filter = uiState.selectedFilter)
                 }
 
@@ -821,6 +883,7 @@ fun CameraViewfinder(
 
         // Scope binding config strictly to hardware-session parameters:
         // - Switching PHOTO <-> PRO reuses the identical still pipeline without camera restart
+        // - Switching into or out of PORTRAIT triggers clean unbindAll() and lifecycle isolation
         // - Toggling HDR never unbinds CameraX
         // - Opening Settings/Overlays freezes camera rebinding so changes apply once upon close
         val liveRequest = CameraBindingRequest(
@@ -828,6 +891,7 @@ fun CameraViewfinder(
                 lensFacing = uiState.lensFacing,
                 aspectRatio = activeAspectRatio,
                 isVideoMode = isVideoMode,
+                isPortraitMode = uiState.cameraMode == CameraMode.PORTRAIT,
                 capturePriority = if (!isVideoMode) uiState.capturePriority else null,
                 videoQuality = if (isVideoMode) uiState.videoQuality else null,
                 videoFps = if (isVideoMode) uiState.videoFps else null,
@@ -887,6 +951,16 @@ fun CameraViewfinder(
                 session.isDisposed.set(true)
                 session.clearCameraStateObserver()
                 session.clearAnalysis()
+                glPortraitViewInstance?.let { glView ->
+                    try {
+                        glView.clearBuffers()
+                        glView.onPause()
+                        glView.visibility = View.GONE
+                    } catch (_: Throwable) {}
+                }
+                glPortraitViewInstance = null
+                latestPortraitPipelineManager?.onExitPortraitMode()
+                latestOnPortraitOemExtensionChanged(false)
                 try {
                     orientationEventListener.disable()
                 } catch (_: Throwable) {}
@@ -958,16 +1032,30 @@ fun CameraViewfinder(
                     .requireLensFacing(targetBindingRequest.core.lensFacing)
                     .build()
 
-                // Configuration changed: tear down stale use cases cleanly before rebinding
+                // Configuration changed: tear down stale use cases cleanly before rebinding.
+                // Mandatory unbindAll() whenever switching into/out of Portrait Mode so ExtensionMode.BOKEH
+                // or Portrait ImageAnalysis never leak into Photo/Pro/Video sessions.
                 val prevCamera = session.boundCamera
                 val prevPreview = session.boundPreview
                 session.clearCameraStateObserver()
                 session.clearAnalysis()
                 session.isSurfaceProviderAttached = false
+                if (!targetBindingRequest.core.isPortraitMode) {
+                    latestOnPortraitOemExtensionChanged(false)
+                    glPortraitViewInstance?.let { glView ->
+                        runOnMainThreadSafe {
+                            glView.clearBuffers()
+                            glView.onPause()
+                            glView.visibility = View.GONE
+                            pv.visibility = View.VISIBLE
+                        }
+                    }
+                }
                 val staleUseCases = session.currentlyBoundUseCases()
                 val sameRebindSession = staleUseCases.isNotEmpty() &&
                     prevConfig?.core?.viewfinderRebindKey == targetBindingRequest.core.viewfinderRebindKey &&
                     prevConfig.core.isVideoMode == targetBindingRequest.core.isVideoMode &&
+                    prevConfig.core.isPortraitMode == targetBindingRequest.core.isPortraitMode &&
                     prevConfig.core.lensFacing == targetBindingRequest.core.lensFacing
                 if (sameRebindSession) {
                     try {
@@ -990,7 +1078,8 @@ fun CameraViewfinder(
                     prevConfig != null &&
                     (prevConfig.core.lensFacing != targetBindingRequest.core.lensFacing ||
                         prevConfig.core.viewfinderRebindKey != targetBindingRequest.core.viewfinderRebindKey ||
-                        prevConfig.core.isVideoMode != targetBindingRequest.core.isVideoMode)
+                        prevConfig.core.isVideoMode != targetBindingRequest.core.isVideoMode ||
+                        prevConfig.core.isPortraitMode != targetBindingRequest.core.isPortraitMode)
                 ) {
                     awaitCameraClosed(prevCamera)
                     if (session.isDisposed.get()) return@LaunchedEffect
@@ -1132,18 +1221,112 @@ fun CameraViewfinder(
                     val imageCapture = imageCaptureBuilder.build()
 
                     val camera: androidx.camera.core.Camera? = try {
-                        if (targetBindingRequest.isAnalysisNeeded) {
+                        val activePortraitMgr = if (targetBindingRequest.core.isPortraitMode) {
+                            latestPortraitPipelineManager
+                        } else {
+                            null
+                        }
+                        if (activePortraitMgr != null) {
+                            // Dual-stage Portrait Mode binding (strictly isolated from Photo/Pro/Video)
+                            val capability = activePortraitMgr.resolveLivePreviewStrategy(
+                                cameraProvider = cameraProvider,
+                                baseSelector = selector,
+                                mainExecutor = mainExecutor
+                            )
+                            var oemBoundCamera: androidx.camera.core.Camera? = null
+                            if (capability.strategy == PortraitPreviewStrategy.NATIVE_OEM_BOKEH) {
+                                try {
+                                    // Extensions must bind Preview + ImageCapture only (never ImageAnalysis)
+                                    val oemPreview = Preview.Builder()
+                                        .setResolutionSelector(defaultAspectResolutionSelector)
+                                        .setTargetRotation(displayRotation)
+                                        .build()
+                                    val oemCamera = cameraProvider.bindToLifecycle(
+                                        lifecycleOwner,
+                                        capability.effectiveSelector,
+                                        oemPreview,
+                                        imageCapture
+                                    )
+                                    attachBoundPreview(oemPreview)
+                                    session.boundImageCapture = imageCapture
+                                    latestOnPortraitOemExtensionChanged(true)
+                                    oemBoundCamera = oemCamera
+                                } catch (extErr: Throwable) {
+                                    android.util.Log.w(
+                                        "CameraViewfinder",
+                                        "ExtensionMode.BOKEH bind failed, falling back to GL Portrait Shader: ${extErr.message}"
+                                    )
+                                    latestOnPortraitOemExtensionChanged(false)
+                                    try {
+                                        cameraProvider.unbindAll()
+                                    } catch (_: Throwable) {}
+                                }
+                            }
+
+                            if (oemBoundCamera != null) {
+                                oemBoundCamera
+                            } else {
+                                latestOnPortraitOemExtensionChanged(false)
+                                val (portraitAnalysis, exec) = buildPortraitImageAnalysis(
+                                    mainExecutor = mainExecutor,
+                                    session = session,
+                                    aspectRatio = targetBindingRequest.core.aspectRatio,
+                                    portraitPipelineManager = activePortraitMgr,
+                                    glViewProvider = { glPortraitViewInstance },
+                                    onHistogramData = { bins -> latestOnHistogramData(bins) },
+                                    onBackdropBitmap = { bmp -> blurredBackdropBitmap = bmp },
+                                    onPortraitTelemetry = { hasSubject, count, source ->
+                                        latestOnPortraitStatusUpdate?.invoke(
+                                            hasSubject,
+                                            count,
+                                            source,
+                                            session.portraitQualityTier.get()
+                                        )
+                                    }
+                                )
+                                session.analysisExecutor = exec
+                                session.boundImageAnalysis = portraitAnalysis
+                                try {
+                                    val portraitPreview = buildPreviewUseCase()
+                                    val bound = cameraProvider.bindToLifecycle(
+                                        lifecycleOwner,
+                                        selector,
+                                        portraitPreview,
+                                        imageCapture,
+                                        portraitAnalysis
+                                    )
+                                    attachBoundPreview(portraitPreview)
+                                    session.boundImageCapture = imageCapture
+                                    bound
+                                } catch (portraitAnalysisErr: Throwable) {
+                                    android.util.Log.w(
+                                        "CameraViewfinder",
+                                        "Portrait 3-use-case bind failed, binding Preview+ImageCapture: ${portraitAnalysisErr.message}"
+                                    )
+                                    session.clearAnalysis()
+                                    try {
+                                        cameraProvider.unbindAll()
+                                    } catch (_: Throwable) {}
+                                    val twoUseCasePreview = buildPreviewUseCase()
+                                    val bound = cameraProvider.bindToLifecycle(
+                                        lifecycleOwner,
+                                        selector,
+                                        twoUseCasePreview,
+                                        imageCapture
+                                    )
+                                    attachBoundPreview(twoUseCasePreview)
+                                    session.boundImageCapture = imageCapture
+                                    bound
+                                }
+                            }
+                        } else if (targetBindingRequest.isAnalysisNeeded) {
+                            latestOnPortraitOemExtensionChanged(false)
                             val (analysis, exec) = buildCombinedImageAnalysis(
                                 mainExecutor = mainExecutor,
                                 session = session,
-                                isLowRamDevice = isLowRamDevice,
                                 aspectRatio = targetBindingRequest.core.aspectRatio,
                                 onHistogramData = { bins -> latestOnHistogramData(bins) },
-                                onBackdropBitmap = { bmp -> blurredBackdropBitmap = bmp },
-                                onPortraitOverlay = { bmp, hasSubject, subjectCount, depthSource, tier ->
-                                    portraitOverlayBitmap = bmp
-                                    latestOnPortraitStatusUpdate?.invoke(hasSubject, subjectCount, depthSource, tier)
-                                }
+                                onBackdropBitmap = { bmp -> blurredBackdropBitmap = bmp }
                             )
                             session.analysisExecutor = exec
                             session.boundImageAnalysis = analysis
@@ -1182,6 +1365,7 @@ fun CameraViewfinder(
                                 bound
                             }
                         } else {
+                            latestOnPortraitOemExtensionChanged(false)
                             val stillPreview = buildPreviewUseCase()
                             val bound = cameraProvider.bindToLifecycle(
                                 lifecycleOwner,
@@ -1723,14 +1907,83 @@ private fun probeCameraXVideoCapabilities(
     }
 }
 
+private fun buildPortraitImageAnalysis(
+    mainExecutor: java.util.concurrent.Executor,
+    session: ViewfinderSessionHolder,
+    aspectRatio: CaptureAspectRatio,
+    portraitPipelineManager: PortraitPipelineManager,
+    glViewProvider: () -> PortraitLiveBlurGLSurfaceView?,
+    onHistogramData: (List<Float>) -> Unit,
+    onBackdropBitmap: (Bitmap) -> Unit,
+    onPortraitTelemetry: (Boolean, Int, PortraitDepthSource) -> Unit
+): Pair<ImageAnalysis, ExecutorService> {
+    val exec = Executors.newSingleThreadExecutor()
+    val is16_9 = (aspectRatio == CaptureAspectRatio.RATIO_16_9 || aspectRatio == CaptureAspectRatio.RATIO_FULL)
+    val analysisSize = if (is16_9) android.util.Size(854, 480) else android.util.Size(640, 480)
+    val aspectStrategy = if (is16_9) {
+        androidx.camera.core.resolutionselector.AspectRatioStrategy.RATIO_16_9_FALLBACK_AUTO_STRATEGY
+    } else {
+        androidx.camera.core.resolutionselector.AspectRatioStrategy.RATIO_4_3_FALLBACK_AUTO_STRATEGY
+    }
+    val analysisRes = androidx.camera.core.resolutionselector.ResolutionSelector.Builder()
+        .setAspectRatioStrategy(aspectStrategy)
+        .setResolutionStrategy(
+            androidx.camera.core.resolutionselector.ResolutionStrategy(
+                analysisSize,
+                androidx.camera.core.resolutionselector.ResolutionStrategy.FALLBACK_RULE_CLOSEST_LOWER_THEN_HIGHER
+            )
+        )
+        .build()
+    val analysis = ImageAnalysis.Builder()
+        .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
+        .setResolutionSelector(analysisRes)
+        .build()
+    var lastHistogramNs = 0L
+    var lastBackdropNs = 0L
+    val bins = IntArray(24)
+    val backdropPixels = IntArray(36 * 48)
+
+    analysis.setAnalyzer(exec) { imageProxy ->
+        try {
+            if (!session.isDisposed.get() && !session.isAnalysisPaused.get() && session.isPortraitActive.get()) {
+                val nowNs = System.nanoTime()
+                if (session.isHistogramActive.get() && (nowNs - lastHistogramNs >= 100_000_000L)) {
+                    lastHistogramNs = nowNs
+                    sampleHistogramBins(imageProxy, bins, mainExecutor, session, onHistogramData)
+                }
+                if (session.isBackdropActive.get() && (nowNs - lastBackdropNs >= 260_000_000L)) {
+                    lastBackdropNs = nowNs
+                    extractLiveBackdrop(imageProxy, backdropPixels, mainExecutor, session, onBackdropBitmap)
+                }
+                // Always closes imageProxy inside processLivePreviewFrame()
+                portraitPipelineManager.processLivePreviewFrame(
+                    imageProxy = imageProxy,
+                    isFrontCamera = session.isFrontCamera.get(),
+                    glView = glViewProvider(),
+                    onStatusTelemetry = { hasSubject, count, depthSource, _, _ ->
+                        mainExecutor.execute {
+                            if (!session.isDisposed.get() && session.isPortraitActive.get()) {
+                                onPortraitTelemetry(hasSubject, count, depthSource)
+                            }
+                        }
+                    }
+                )
+            } else {
+                imageProxy.close()
+            }
+        } catch (_: Throwable) {
+            try { imageProxy.close() } catch (_: Throwable) {}
+        }
+    }
+    return analysis to exec
+}
+
 private fun buildCombinedImageAnalysis(
     mainExecutor: java.util.concurrent.Executor,
     session: ViewfinderSessionHolder,
-    isLowRamDevice: Boolean,
     aspectRatio: CaptureAspectRatio,
     onHistogramData: (List<Float>) -> Unit,
-    onBackdropBitmap: (Bitmap) -> Unit,
-    onPortraitOverlay: (Bitmap?, Boolean, Int, PortraitDepthSource, PortraitQualityTier) -> Unit
+    onBackdropBitmap: (Bitmap) -> Unit
 ): Pair<ImageAnalysis, ExecutorService> {
     val exec = Executors.newSingleThreadExecutor()
     val is16_9 = (aspectRatio == CaptureAspectRatio.RATIO_16_9 || aspectRatio == CaptureAspectRatio.RATIO_FULL)
@@ -1755,9 +2008,6 @@ private fun buildCombinedImageAnalysis(
         .build()
     var lastHistogramNs = 0L
     var lastBackdropNs = 0L
-    var lastPortraitNs = 0L
-    var slowPortraitStreak = 0
-    var fastPortraitStreak = 0
     val bins = IntArray(24)
     val backdropPixels = IntArray(36 * 48)
     analysis.setAnalyzer(exec) { imageProxy ->
@@ -1766,201 +2016,15 @@ private fun buildCombinedImageAnalysis(
                 val nowNs = System.nanoTime()
                 val wantHistogram = session.isHistogramActive.get() && (nowNs - lastHistogramNs >= 100_000_000L)
                 val wantBackdrop = session.isBackdropActive.get() && (nowNs - lastBackdropNs >= 260_000_000L)
-                val currentTier = session.portraitQualityTier.get()
-                val wantPortrait = session.isPortraitActive.get() && (nowNs - lastPortraitNs >= currentTier.previewMinIntervalNs)
 
                 if (wantHistogram) {
                     lastHistogramNs = nowNs
-                    val yPlane = imageProxy.planes.firstOrNull()
-                    if (yPlane != null) {
-                        val buf = yPlane.buffer
-                        val rowStride = yPlane.rowStride
-                        val pixelStride = yPlane.pixelStride
-                        val w = imageProxy.width
-                        val h = imageProxy.height
-                        bins.fill(0)
-                        val limit = buf.limit()
-                        var row = 0
-                        while (row < h) {
-                            val rowOffset = row * rowStride
-                            var col = 0
-                            while (col < w) {
-                                val idx = rowOffset + col * pixelStride
-                                if (idx in 0 until limit) {
-                                    val yVal = buf.get(idx).toInt() and 0xFF
-                                    val binIdx = (yVal * 24 / 256).coerceIn(0, 23)
-                                    bins[binIdx]++
-                                }
-                                col += 8
-                            }
-                            row += 8
-                        }
-                        val maxBin = bins.maxOrNull()?.coerceAtLeast(1) ?: 1
-                        val normalized = List(24) { i -> bins[i].toFloat() / maxBin.toFloat() }
-                        mainExecutor.execute {
-                            if (!session.isDisposed.get() && session.isHistogramActive.get()) {
-                                onHistogramData(normalized)
-                            }
-                        }
-                    }
+                    sampleHistogramBins(imageProxy, bins, mainExecutor, session, onHistogramData)
                 }
 
                 if (wantBackdrop) {
                     lastBackdropNs = nowNs
-                    val planes = imageProxy.planes
-                    val w = imageProxy.width
-                    val h = imageProxy.height
-                    if (planes.isNotEmpty() && w > 1 && h > 1) {
-                        val dstW = 36
-                        val dstH = 48
-                        val yPlane = planes[0]
-                        val yBuf = yPlane.buffer
-                        val yRowStride = yPlane.rowStride
-                        val yPixelStride = yPlane.pixelStride
-                        val yLimit = yBuf.limit()
-
-                        val hasUv = planes.size >= 3
-                        val uPlane = if (hasUv) planes[1] else null
-                        val vPlane = if (hasUv) planes[2] else null
-                        val uBuf = uPlane?.buffer
-                        val vBuf = vPlane?.buffer
-                        val uRowStride = uPlane?.rowStride ?: 0
-                        val uPixelStride = uPlane?.pixelStride ?: 0
-                        val uLimit = uBuf?.limit() ?: 0
-                        val vRowStride = vPlane?.rowStride ?: 0
-                        val vPixelStride = vPlane?.pixelStride ?: 0
-                        val vLimit = vBuf?.limit() ?: 0
-
-                        val rotation = imageProxy.imageInfo.rotationDegrees
-                        val isFront = session.isFrontCamera.get()
-                        val wMax = w - 1
-                        val hMax = h - 1
-
-                        for (dy in 0 until dstH) {
-                            val ny = dy.toFloat() / (dstH - 1f)
-                            for (dx in 0 until dstW) {
-                                val nx = dx.toFloat() / (dstW - 1f)
-                                val mx = if (isFront) 1f - nx else nx
-                                val uNorm: Float
-                                val vNorm: Float
-                                when (rotation) {
-                                    90 -> {
-                                        uNorm = ny
-                                        vNorm = 1f - mx
-                                    }
-                                    180 -> {
-                                        uNorm = 1f - mx
-                                        vNorm = 1f - ny
-                                    }
-                                    270 -> {
-                                        uNorm = 1f - ny
-                                        vNorm = mx
-                                    }
-                                    else -> {
-                                        uNorm = mx
-                                        vNorm = ny
-                                    }
-                                }
-                                val sx = (uNorm * wMax).toInt().coerceIn(0, wMax)
-                                val sy = (vNorm * hMax).toInt().coerceIn(0, hMax)
-                                val yIdx = sy * yRowStride + sx * yPixelStride
-                                val yVal = if (yIdx in 0 until yLimit) (yBuf.get(yIdx).toInt() and 0xFF) else 0
-
-                                val r: Int
-                                val g: Int
-                                val b: Int
-                                if (hasUv && uBuf != null && vBuf != null) {
-                                    val uvX = sx shr 1
-                                    val uvY = sy shr 1
-                                    val uIdx = uvY * uRowStride + uvX * uPixelStride
-                                    val vIdx = uvY * vRowStride + uvX * vPixelStride
-                                    val uVal = if (uIdx in 0 until uLimit) ((uBuf.get(uIdx).toInt() and 0xFF) - 128) else 0
-                                    val vVal = if (vIdx in 0 until vLimit) ((vBuf.get(vIdx).toInt() and 0xFF) - 128) else 0
-                                    r = (yVal + (1.370705f * vVal)).toInt().coerceIn(0, 255)
-                                    g = (yVal - (0.337633f * uVal) - (0.698001f * vVal)).toInt().coerceIn(0, 255)
-                                    b = (yVal + (1.732446f * uVal)).toInt().coerceIn(0, 255)
-                                } else {
-                                    r = yVal
-                                    g = yVal
-                                    b = yVal
-                                }
-                                backdropPixels[dy * dstW + dx] = (0xFF shl 24) or (r shl 16) or (g shl 8) or b
-                            }
-                        }
-                        val bmp = Bitmap.createBitmap(backdropPixels, dstW, dstH, Bitmap.Config.ARGB_8888)
-                        mainExecutor.execute {
-                            if (!session.isDisposed.get() && session.isBackdropActive.get()) {
-                                onBackdropBitmap(bmp)
-                            }
-                        }
-                    }
-                }
-
-                if (wantPortrait) {
-                    lastPortraitNs = nowNs
-                    val startMs = android.os.SystemClock.elapsedRealtime()
-                    val uprightFrame = extractUprightPortraitFrame(
-                        imageProxy = imageProxy,
-                        targetMaxDim = currentTier.previewMaxDim,
-                        isFront = session.isFrontCamera.get()
-                    )
-                    if (uprightFrame != null) {
-                        val seg = PortraitSegmentationEngine.segmentBitmap(
-                            uprightBitmap = uprightFrame,
-                            isPreviewStream = true,
-                            focusX = session.portraitFocusX.get(),
-                            focusY = session.portraitFocusY.get(),
-                            hardwareDepthFrame = null
-                        )
-                        val blur = session.portraitBlurIntensity.get().coerceIn(0f, 1f)
-                        val overlay = if (currentTier.enableLivePreviewBokeh && blur > 0.015f) {
-                            PortraitBokehRenderer.renderLivePreviewOverlay(
-                                uprightFrame = uprightFrame,
-                                segmentation = seg,
-                                blurIntensity = blur,
-                                filter = session.portraitFilter.get()
-                            )
-                        } else {
-                            null
-                        }
-                        if (!uprightFrame.isRecycled) {
-                            uprightFrame.recycle()
-                        }
-
-                        val elapsedMs = android.os.SystemClock.elapsedRealtime() - startMs
-                        var nextTier = currentTier
-                        if (elapsedMs > 160L) {
-                            slowPortraitStreak++
-                            fastPortraitStreak = 0
-                            if (slowPortraitStreak >= 3) {
-                                slowPortraitStreak = 0
-                                nextTier = when (currentTier) {
-                                    PortraitQualityTier.HIGH -> PortraitQualityTier.BALANCED
-                                    PortraitQualityTier.BALANCED -> PortraitQualityTier.EFFICIENT
-                                    PortraitQualityTier.EFFICIENT -> PortraitQualityTier.EFFICIENT
-                                }
-                            }
-                        } else if (elapsedMs < 48L && !isLowRamDevice) {
-                            fastPortraitStreak++
-                            slowPortraitStreak = 0
-                            if (fastPortraitStreak >= 6 && currentTier == PortraitQualityTier.BALANCED) {
-                                fastPortraitStreak = 0
-                                nextTier = PortraitQualityTier.HIGH
-                            }
-                        } else {
-                            slowPortraitStreak = 0
-                            fastPortraitStreak = 0
-                        }
-                        if (nextTier != currentTier) {
-                            session.portraitQualityTier.set(nextTier)
-                        }
-
-                        mainExecutor.execute {
-                            if (!session.isDisposed.get() && session.isPortraitActive.get()) {
-                                onPortraitOverlay(overlay, seg.hasSubject, seg.subjectCount, seg.source, nextTier)
-                            }
-                        }
-                    }
+                    extractLiveBackdrop(imageProxy, backdropPixels, mainExecutor, session, onBackdropBitmap)
                 }
             }
         } catch (_: Throwable) {
@@ -1971,27 +2035,59 @@ private fun buildCombinedImageAnalysis(
     return analysis to exec
 }
 
-private fun extractUprightPortraitFrame(
+private fun sampleHistogramBins(
     imageProxy: androidx.camera.core.ImageProxy,
-    targetMaxDim: Int,
-    isFront: Boolean
-): Bitmap? {
+    bins: IntArray,
+    mainExecutor: java.util.concurrent.Executor,
+    session: ViewfinderSessionHolder,
+    onHistogramData: (List<Float>) -> Unit
+) {
+    val yPlane = imageProxy.planes.firstOrNull() ?: return
+    val buf = yPlane.buffer
+    val rowStride = yPlane.rowStride
+    val pixelStride = yPlane.pixelStride
+    val w = imageProxy.width
+    val h = imageProxy.height
+    bins.fill(0)
+    val limit = buf.limit()
+    var row = 0
+    while (row < h) {
+        val rowOffset = row * rowStride
+        var col = 0
+        while (col < w) {
+            val idx = rowOffset + col * pixelStride
+            if (idx in 0 until limit) {
+                val yVal = buf.get(idx).toInt() and 0xFF
+                val binIdx = (yVal * 24 / 256).coerceIn(0, 23)
+                bins[binIdx]++
+            }
+            col += 8
+        }
+        row += 8
+    }
+    val maxBin = bins.maxOrNull()?.coerceAtLeast(1) ?: 1
+    val normalized = List(24) { i -> bins[i].toFloat() / maxBin.toFloat() }
+    mainExecutor.execute {
+        if (!session.isDisposed.get() && session.isHistogramActive.get()) {
+            onHistogramData(normalized)
+        }
+    }
+}
+
+private fun extractLiveBackdrop(
+    imageProxy: androidx.camera.core.ImageProxy,
+    backdropPixels: IntArray,
+    mainExecutor: java.util.concurrent.Executor,
+    session: ViewfinderSessionHolder,
+    onBackdropBitmap: (Bitmap) -> Unit
+) {
     val planes = imageProxy.planes
-    val srcW = imageProxy.width
-    val srcH = imageProxy.height
-    if (planes.isEmpty() || srcW <= 2 || srcH <= 2) return null
+    val w = imageProxy.width
+    val h = imageProxy.height
+    if (planes.isEmpty() || w <= 1 || h <= 1) return
 
-    val rotation = imageProxy.imageInfo.rotationDegrees
-    val rotatedSwapped = rotation == 90 || rotation == 270
-    val uprightSrcW = if (rotatedSwapped) srcH else srcW
-    val uprightSrcH = if (rotatedSwapped) srcW else srcH
-    val scale = kotlin.math.min(
-        1f,
-        targetMaxDim.toFloat() / kotlin.math.max(uprightSrcW, uprightSrcH).coerceAtLeast(1)
-    )
-    val dstW = (uprightSrcW * scale).toInt().coerceAtLeast(64)
-    val dstH = (uprightSrcH * scale).toInt().coerceAtLeast(64)
-
+    val dstW = 36
+    val dstH = 48
     val yPlane = planes[0]
     val yBuf = yPlane.buffer
     val yRowStride = yPlane.rowStride
@@ -2010,17 +2106,15 @@ private fun extractUprightPortraitFrame(
     val vPixelStride = vPlane?.pixelStride ?: 0
     val vLimit = vBuf?.limit() ?: 0
 
-    val outPixels = IntArray(dstW * dstH)
-    val wMax = srcW - 1
-    val hMax = srcH - 1
-    val xDenom = (dstW - 1).coerceAtLeast(1).toFloat()
-    val yDenom = (dstH - 1).coerceAtLeast(1).toFloat()
+    val rotation = imageProxy.imageInfo.rotationDegrees
+    val isFront = session.isFrontCamera.get()
+    val wMax = w - 1
+    val hMax = h - 1
 
     for (dy in 0 until dstH) {
-        val ny = dy / yDenom
-        val rowOffsetOut = dy * dstW
+        val ny = dy.toFloat() / (dstH - 1f)
         for (dx in 0 until dstW) {
-            val nx = dx / xDenom
+            val nx = dx.toFloat() / (dstW - 1f)
             val mx = if (isFront) 1f - nx else nx
             val uNorm: Float
             val vNorm: Float
@@ -2065,10 +2159,15 @@ private fun extractUprightPortraitFrame(
                 g = yVal
                 b = yVal
             }
-            outPixels[rowOffsetOut + dx] = (0xFF shl 24) or (r shl 16) or (g shl 8) or b
+            backdropPixels[dy * dstW + dx] = (0xFF shl 24) or (r shl 16) or (g shl 8) or b
         }
     }
-    return Bitmap.createBitmap(outPixels, dstW, dstH, Bitmap.Config.ARGB_8888)
+    val bmp = Bitmap.createBitmap(backdropPixels, dstW, dstH, Bitmap.Config.ARGB_8888)
+    mainExecutor.execute {
+        if (!session.isDisposed.get() && session.isBackdropActive.get()) {
+            onBackdropBitmap(bmp)
+        }
+    }
 }
 
 @Composable

@@ -33,6 +33,28 @@ enum class PortraitQualityTier(
     EFFICIENT("Capture Only", 320, 220_000_000L, false)
 }
 
+enum class PortraitPreviewStrategy(val displayName: String) {
+    CHECKING("Detecting"),
+    NATIVE_OEM_BOKEH("OEM Bokeh"),
+    UNIVERSAL_GL_SHADER("GL Bokeh")
+}
+
+enum class PortraitCaptureTier(val displayName: String, val badgeLabel: String) {
+    CAMERA_X_BOKEH("CameraX OEM Bokeh", "OEM BOKEH"),
+    HARDWARE_DEPTH16("Hardware DEPTH16", "DEPTH16"),
+    MLKIT_SUBJECT_SEGMENTATION("ML Kit Subject AI", "SUBJECT AI"),
+    MLKIT_SELFIE_SEGMENTATION("ML Kit Offline AI", "OFFLINE AI"),
+    SOFTWARE_FALLBACK("Portrait Software Depth", "SOFTWARE")
+}
+
+enum class PortraitSubjectModelStatus {
+    UNCHECKED,
+    CHECKING,
+    DOWNLOADING,
+    READY,
+    UNAVAILABLE
+}
+
 object PortraitApertureFormatter {
     fun blurIntensityToFStop(blurIntensity: Float): Float {
         val clamped = blurIntensity.coerceIn(0f, 1f)
@@ -997,6 +1019,12 @@ data class CameraUiState(
     val isPortraitSubjectDetected: Boolean = false,
     val portraitSubjectCount: Int = 0,
     val portraitQualityTier: PortraitQualityTier = PortraitQualityTier.BALANCED,
+    val portraitPreviewStrategy: PortraitPreviewStrategy = PortraitPreviewStrategy.CHECKING,
+    val portraitCaptureTier: PortraitCaptureTier = PortraitCaptureTier.MLKIT_SELFIE_SEGMENTATION,
+    val portraitSubjectModelStatus: PortraitSubjectModelStatus = PortraitSubjectModelStatus.UNCHECKED,
+    val portraitSubjectModelProgress: Int = 0,
+    val isPortraitLiveBlurPausedByWatchdog: Boolean = false,
+    val portraitLiveFps: Float = 0f,
     val postCapturePortraitTarget: PostCapturePortraitTarget? = null,
     val isPortraitEditorOpen: Boolean = false,
     val isPortraitEditorSaving: Boolean = false,

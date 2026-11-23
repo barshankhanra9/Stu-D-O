@@ -78,6 +78,9 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
     val recycleBinManager = com.example.data.RecycleBinManager(appContext)
     private val ultraResCaptureManager = com.example.data.UltraResCaptureManager(appContext)
     private val oemRegistry = com.example.oem.OemAdapterRegistry()
+    val portraitPipelineManager = com.example.portrait.PortraitPipelineManager(appContext)
+    @Volatile
+    private var isOemBokehExtensionActive = false
 
     private val _uiState = MutableStateFlow(CameraUiState())
     val uiState: StateFlow<CameraUiState> = _uiState.asStateFlow()
@@ -179,6 +182,23 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
         }
         refreshLensCapabilities()
         refreshRecycleBinState()
+        viewModelScope.launch {
+            portraitPipelineManager.status.collect { pStatus ->
+                _uiState.update { cur ->
+                    val inPortrait = cur.cameraMode == CameraMode.PORTRAIT
+                    cur.copy(
+                        portraitPreviewStrategy = pStatus.previewStrategy,
+                        portraitCaptureTier = pStatus.activeCaptureTier,
+                        portraitSubjectModelStatus = pStatus.subjectModelStatus,
+                        portraitSubjectModelProgress = pStatus.subjectModelProgress,
+                        isPortraitLiveBlurPausedByWatchdog = if (inPortrait) pStatus.isLiveBlurPausedByWatchdog else false,
+                        portraitLiveFps = if (inPortrait) pStatus.livePreviewFps else 0f,
+                        isPortraitSubjectDetected = if (inPortrait) (pStatus.isSubjectDetected || cur.isPortraitSubjectDetected) else false,
+                        portraitSubjectCount = if (inPortrait) maxOf(pStatus.subjectCount, cur.portraitSubjectCount) else 0
+                    )
+                }
+            }
+        }
     }
 
     // Isolated UI state flows prevent high-frequency viewfinder/sensor updates from recomposing overlays
@@ -529,20 +549,32 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     fun setCameraMode(mode: CameraMode) {
-        if (_uiState.value.cameraMode != mode) {
+        val currentMode = _uiState.value.cameraMode
+        if (currentMode != mode) {
             dismissScreenFlash()
             if (_uiState.value.isRecordingVideo) {
                 stopVideoRecording()
             }
+            val wasPortrait = (currentMode == CameraMode.PORTRAIT)
+            val enteringPortrait = (mode == CameraMode.PORTRAIT)
             val isFront = (_uiState.value.lensFacing == CameraSelector.LENS_FACING_FRONT)
             val cap = capabilityDetector.getCapabilityForLens(isFront)
             val videoSupportedForLens = cap?.isVideoRecordingSupported ?: true
 
+            if (wasPortrait && !enteringPortrait) {
+                isOemBokehExtensionActive = false
+                portraitPipelineManager.onExitPortraitMode()
+            } else if (!wasPortrait && enteringPortrait) {
+                isOemBokehExtensionActive = false
+                portraitPipelineManager.onEnterPortraitMode()
+            }
+
             val updatedState = _uiState.updateAndGet {
                 val switchingVideo = (it.cameraMode == CameraMode.VIDEO) != (mode == CameraMode.VIDEO)
+                val switchingPortrait = wasPortrait != enteringPortrait
                 it.copy(
                     cameraMode = mode,
-                    isCameraReady = if (switchingVideo) false else it.isCameraReady,
+                    isCameraReady = if (switchingVideo || switchingPortrait) false else it.isCameraReady,
                     activeCameraPanel = com.example.model.ActiveCameraPanel.NONE,
                     isFilterSelectorOpen = false,
                     isQuickSettingsOpen = false,
@@ -550,8 +582,11 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
                     activeProTab = com.example.model.ProControlTab.NONE,
                     showExposureSlider = false,
                     isVideoRecordingSupported = if (mode == CameraMode.VIDEO) videoSupportedForLens else it.isVideoRecordingSupported,
-                    isPortraitSubjectDetected = if (mode == CameraMode.PORTRAIT) it.isPortraitSubjectDetected else false,
-                    portraitSubjectCount = if (mode == CameraMode.PORTRAIT) it.portraitSubjectCount else 0
+                    isPortraitSubjectDetected = if (enteringPortrait) it.isPortraitSubjectDetected else false,
+                    portraitSubjectCount = if (enteringPortrait) it.portraitSubjectCount else 0,
+                    isPortraitLiveBlurPausedByWatchdog = if (enteringPortrait) it.isPortraitLiveBlurPausedByWatchdog else false,
+                    portraitLiveFps = if (enteringPortrait) it.portraitLiveFps else 0f,
+                    portraitPreviewStrategy = if (enteringPortrait) com.example.model.PortraitPreviewStrategy.CHECKING else it.portraitPreviewStrategy
                 )
             }
             syncImageCaptureFlashMode(state = updatedState)
@@ -564,6 +599,10 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
                 clearProSettingsFromPreview()
             }
         }
+    }
+
+    fun onPortraitExtensionBindingChanged(isOemBokehActive: Boolean) {
+        isOemBokehExtensionActive = isOemBokehActive && (_uiState.value.cameraMode == CameraMode.PORTRAIT)
     }
 
     fun toggleLens() {
@@ -1099,11 +1138,12 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
         syncImageCaptureFlashMode(imageCapture)
 
         val isPortraitMode = _uiState.value.cameraMode == CameraMode.PORTRAIT
+        val isOemBokeh = isPortraitMode && isOemBokehExtensionActive
         val portraitBlur = _uiState.value.portraitBlurIntensity
         val portraitFocus = _uiState.value.portraitFocusPointNormalized
-        val portraitCap = if (isPortraitMode) capabilityDetector.getCapabilityForLens(isFront) else null
+        val portraitCap = if (isPortraitMode && !isOemBokeh) capabilityDetector.getCapabilityForLens(isFront) else null
         val hwDepthProvider: (() -> com.example.portrait.HardwareDepthFrame?)? =
-            if (isPortraitMode && portraitCap != null && portraitCap.isDepthOutputSupported && portraitCap.depth16Sizes.isNotEmpty()) {
+            if (isPortraitMode && !isOemBokeh && portraitCap != null && portraitCap.isDepthOutputSupported && portraitCap.depth16Sizes.isNotEmpty()) {
                 {
                     captureHardwareDepthWithTemporaryUnbind(
                         cap = portraitCap,
@@ -1137,12 +1177,15 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
             portraitFocusY = portraitFocus?.y,
             portraitDepthFrameProvider = hwDepthProvider,
             portraitSidecarStorage = if (isPortraitMode) portraitSidecarStorage else null,
-            onPortraitProcessed = { source, subjectCount ->
+            portraitPipelineManager = if (isPortraitMode) portraitPipelineManager else null,
+            isPortraitOemBokehCapture = isOemBokeh,
+            onPortraitProcessed = { source, subjectCount, captureTier ->
                 _uiState.update {
                     it.copy(
                         portraitDepthSource = source,
                         portraitSubjectCount = subjectCount,
                         isPortraitSubjectDetected = subjectCount > 0,
+                        portraitCaptureTier = captureTier,
                         portraitSidecarRevision = it.portraitSidecarRevision + 1L
                     )
                 }
@@ -3121,6 +3164,7 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
         }
         try { mediaSound?.release() } catch (_: Throwable) {}
         mediaSound = null
+        portraitPipelineManager.onExitPortraitMode()
         mediaCaptureManager.shutdown()
         ultraResCaptureManager.shutdown()
     }

@@ -31,8 +31,11 @@ import com.example.model.CameraMode
 import com.example.model.CameraUiState
 import com.example.model.MediaItem
 import com.example.model.PortraitApertureFormatter
+import com.example.model.PortraitCaptureTier
 import com.example.model.PortraitDepthSource
+import com.example.model.PortraitPreviewStrategy
 import com.example.model.PortraitQualityTier
+import com.example.model.PortraitSubjectModelStatus
 import com.example.model.PostCapturePortraitTarget
 import com.example.model.ScreenFlashMode
 import com.example.model.WatermarkConfig
@@ -40,6 +43,8 @@ import com.example.portrait.BokehRenderOptions
 import com.example.portrait.HardwareDepthFrame
 import com.example.portrait.HardwareDepthProcessor
 import com.example.portrait.PortraitBokehRenderer
+import com.example.portrait.PortraitFpsWatchdog
+import com.example.portrait.PortraitPipelineManager
 import com.example.portrait.PortraitSegmentationEngine
 import com.example.portrait.PortraitSegmentationResult
 import com.example.portrait.PortraitSidecarStorage
@@ -574,6 +579,212 @@ class PortraitModeTest {
         assertTrue(copyClicked)
         composeTestRule.onNodeWithTag("portrait_editor_update_button").performClick()
         assertTrue(updateClicked)
+    }
+
+    @Test
+    fun `fps watchdog pauses live blur only when fps drops below 15 for over 2 seconds and resets cleanly`() {
+        var fakeTimeMs = 1000L
+        val watchdog = PortraitFpsWatchdog(
+            lowFpsThreshold = 15f,
+            sustainDurationMs = 2000L,
+            evaluationWindowMs = 500L,
+            timeMsProvider = { fakeTimeMs }
+        )
+
+        // Start clock
+        assertFalse(watchdog.onFrameRendered(fakeTimeMs))
+
+        // Simulate smooth 30 FPS (every 33ms) -> must never pause
+        for (i in 1..40) {
+            fakeTimeMs += 33L
+            assertFalse(watchdog.onFrameRendered(fakeTimeMs))
+        }
+        assertFalse(watchdog.isPaused)
+        assertTrue(watchdog.lastMeasuredFps > 25f)
+
+        // Drop to 10 FPS (1 frame every 100ms = 5 frames in 500ms) for 1.5s -> not yet 2s sustained
+        for (step in 1..15) {
+            fakeTimeMs += 100L
+            assertFalse(watchdog.onFrameRendered(fakeTimeMs))
+        }
+        assertFalse(watchdog.isPaused)
+
+        // Recover to 30 FPS for 1 window -> resets the low-FPS timer
+        for (i in 1..16) {
+            fakeTimeMs += 33L
+            assertFalse(watchdog.onFrameRendered(fakeTimeMs))
+        }
+        assertFalse(watchdog.isPaused)
+
+        // Now drop continuously to 8 FPS (every 125ms) for >2.5s -> must trigger pause
+        var triggered = false
+        for (step in 1..28) {
+            fakeTimeMs += 125L
+            if (watchdog.onFrameRendered(fakeTimeMs)) {
+                triggered = true
+                break
+            }
+        }
+        assertTrue("Expected FPS watchdog to pause below 15 FPS for >2s", triggered)
+        assertTrue(watchdog.isPaused)
+
+        watchdog.reset()
+        assertFalse(watchdog.isPaused)
+    }
+
+    @Test
+    fun `portrait capture caps 50mp resolution at 4000px longest edge and computes safe sample size`() {
+        // 50MP sensor (~8160x6120): decode sampleSize halves longest edge safely to >=4000px
+        assertEquals(2, PortraitPipelineManager.computePortraitDecodeSampleSize(8160, 6120))
+        // 108MP sensor (~12000x9000): sampleSize 2 -> 6000px, then capPortraitResolution scales to 4000x3000
+        assertEquals(2, PortraitPipelineManager.computePortraitDecodeSampleSize(12000, 9000))
+        // Standard 12MP (4000x3000): sampleSize 1 (no downsampling loss)
+        assertEquals(1, PortraitPipelineManager.computePortraitDecodeSampleSize(4000, 3000))
+
+        // 4800x3600 upright bitmap (~17MP) -> scaled down to 4000x3000 (12MP)
+        val oversized = Bitmap.createBitmap(4800, 3600, Bitmap.Config.ARGB_8888)
+        val capped = PortraitPipelineManager.capPortraitResolution(oversized)
+        assertEquals(4000, capped.width)
+        assertEquals(3000, capped.height)
+        if (capped !== oversized) capped.recycle()
+        oversized.recycle()
+
+        // 1200x900 bitmap -> returned as-is
+        val normal = Bitmap.createBitmap(1200, 900, Bitmap.Config.ARGB_8888)
+        val same = PortraitPipelineManager.capPortraitResolution(normal)
+        assertTrue(same === normal)
+        normal.recycle()
+    }
+
+    @Test
+    fun `portrait pipeline manager executes all 4 capture tiers cleanly and cleans up on exit`() {
+        val manager = PortraitPipelineManager(app)
+        manager.onEnterPortraitMode()
+
+        val scene = createSyntheticTwoSubjectScene(160, 120)
+        val maskSize = 80 * 60
+        val centerMask = FloatArray(maskSize) { idx ->
+            val x = idx % 80
+            val y = idx / 80
+            if (x in 15..35 && y in 15..45) 0.95f else 0.05f
+        }
+
+        // Tier 1: OEM Bokeh extension handles render natively (no double software blur)
+        val tier1 = manager.executeCaptureWaterfall(
+            uprightBitmap = scene,
+            isOemExtensionCapture = true,
+            focusX = 0.25f,
+            focusY = 0.50f
+        )
+        assertEquals(PortraitCaptureTier.CAMERA_X_BOKEH, tier1.captureTier)
+        assertTrue(tier1.handledByOemExtension)
+
+        // Tier 2: Hardware DEPTH16 takes priority over software tiers
+        val hwDepth = HardwareDepthFrame(
+            width = 80,
+            height = 60,
+            depthMeters = FloatArray(maskSize) { idx -> if ((idx % 80) in 15..35) 0.9f else 5.2f },
+            confidence = FloatArray(maskSize) { 1f },
+            validFraction = 1f
+        )
+        val tier2 = manager.executeCaptureWaterfall(
+            uprightBitmap = scene,
+            isOemExtensionCapture = false,
+            focusX = 0.25f,
+            focusY = 0.50f,
+            hardwareDepthProvider = { hwDepth },
+            subjectMaskOverride = centerMask to (80 to 60)
+        )
+        assertEquals(PortraitCaptureTier.HARDWARE_DEPTH16, tier2.captureTier)
+        assertFalse(tier2.handledByOemExtension)
+        assertNotNull(tier2.segmentation)
+
+        // Tier 3: Subject Segmentation (people/pets/objects) + Guided Filter
+        val tier3 = manager.executeCaptureWaterfall(
+            uprightBitmap = scene,
+            isOemExtensionCapture = false,
+            focusX = 0.25f,
+            focusY = 0.50f,
+            hardwareDepthProvider = null,
+            subjectMaskOverride = centerMask to (80 to 60)
+        )
+        assertEquals(PortraitCaptureTier.MLKIT_SUBJECT_SEGMENTATION, tier3.captureTier)
+        assertNotNull(tier3.segmentation)
+        assertTrue(tier3.segmentation!!.hasSubject)
+
+        // Tier 4: Bundled Selfie Segmentation fallback when Subject model unavailable/offline
+        val tier4 = manager.executeCaptureWaterfall(
+            uprightBitmap = scene,
+            isOemExtensionCapture = false,
+            focusX = 0.25f,
+            focusY = 0.50f,
+            hardwareDepthProvider = null,
+            subjectMaskOverride = null,
+            selfieMaskOverride = centerMask to (80 to 60)
+        )
+        assertEquals(PortraitCaptureTier.MLKIT_SELFIE_SEGMENTATION, tier4.captureTier)
+        assertNotNull(tier4.segmentation)
+
+        // Offline zero-MLKit software fallback still succeeds without throwing MlKitException
+        val tierOffline = manager.executeCaptureWaterfall(
+            uprightBitmap = scene,
+            isOemExtensionCapture = false,
+            focusX = 0.25f,
+            focusY = 0.50f
+        )
+        assertNotNull(tierOffline.segmentation)
+
+        manager.onExitPortraitMode()
+        assertEquals(PortraitPreviewStrategy.CHECKING, manager.status.value.previewStrategy)
+        assertFalse(manager.status.value.isLiveBlurPausedByWatchdog)
+    }
+
+    @Test
+    fun `portrait controls bar displays watchdog fallback badge and model download progress cleanly`() {
+        val state = CameraUiState(
+            cameraMode = CameraMode.PORTRAIT,
+            portraitBlurIntensity = 0.62f,
+            portraitPreviewStrategy = PortraitPreviewStrategy.UNIVERSAL_GL_SHADER,
+            portraitSubjectModelStatus = PortraitSubjectModelStatus.DOWNLOADING,
+            portraitSubjectModelProgress = 64,
+            isPortraitLiveBlurPausedByWatchdog = true
+        )
+
+        composeTestRule.setContent {
+            PortraitControlsBar(
+                uiState = state,
+                onBlurIntensityChanged = {}
+            )
+        }
+
+        composeTestRule.onNodeWithTag("portrait_watchdog_badge").assertIsDisplayed()
+        composeTestRule.onNodeWithText("Portrait blur applied on capture").assertIsDisplayed()
+        composeTestRule.onNodeWithTag("portrait_subject_download_badge").assertIsDisplayed()
+    }
+
+    @Test
+    fun `subject optional module api resolves feature without preloading mlkit client and gl view handles no-context lifecycle safely`() {
+        val manager = PortraitPipelineManager(app)
+        val optionalApi = manager.resolveSubjectOptionalModuleApi()
+        val features = optionalApi.optionalFeatures
+        assertTrue(features.isNotEmpty())
+        assertTrue(features.any { it.name.contains("subject", ignoreCase = true) })
+
+        val glView = com.example.portrait.PortraitLiveBlurGLSurfaceView(app)
+        glView.visibility = android.view.View.GONE
+        glView.clearBuffers()
+        glView.onPause()
+        glView.submitCameraYuvFrame(
+            yBytes = ByteArray(64 * 48),
+            uBytes = ByteArray(32 * 24),
+            vBytes = ByteArray(32 * 24),
+            width = 64,
+            height = 48,
+            rotationDegrees = 0,
+            isFrontCamera = false
+        )
+        glView.submitSegmentationMask(FloatArray(64 * 48), 64, 48)
+        glView.clearBuffers()
     }
 
     private fun createSyntheticTwoSubjectScene(w: Int, h: Int): Bitmap {

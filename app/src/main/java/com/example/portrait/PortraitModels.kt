@@ -1,6 +1,9 @@
 package com.example.portrait
 
+import com.example.model.PortraitCaptureTier
 import com.example.model.PortraitDepthSource
+import com.example.model.PortraitPreviewStrategy
+import com.example.model.PortraitSubjectModelStatus
 
 data class HardwareDepthFrame(
     val width: Int,
@@ -58,7 +61,8 @@ data class PortraitSegmentationResult(
     val subjectCount: Int,
     val hasSubject: Boolean,
     val source: PortraitDepthSource,
-    val subjects: List<PortraitSubjectRegion> = emptyList()
+    val subjects: List<PortraitSubjectRegion> = emptyList(),
+    val captureTier: PortraitCaptureTier = PortraitCaptureTier.MLKIT_SELFIE_SEGMENTATION
 )
 
 data class BokehRenderOptions(
@@ -68,3 +72,21 @@ data class BokehRenderOptions(
     val maxBokehRadiusAtFullIntensity: Float = 42f,
     val highlightBloomStrength: Float = 0.55f
 )
+
+data class PortraitPipelineStatus(
+    val previewStrategy: PortraitPreviewStrategy = PortraitPreviewStrategy.CHECKING,
+    val activeCaptureTier: PortraitCaptureTier = PortraitCaptureTier.MLKIT_SELFIE_SEGMENTATION,
+    val subjectModelStatus: PortraitSubjectModelStatus = PortraitSubjectModelStatus.UNCHECKED,
+    val subjectModelProgress: Int = 0,
+    val isLiveBlurPausedByWatchdog: Boolean = false,
+    val livePreviewFps: Float = 0f,
+    val isSubjectDetected: Boolean = false,
+    val subjectCount: Int = 0
+)
+
+data class PortraitCaptureWaterfallResult(
+    val captureTier: PortraitCaptureTier,
+    val segmentation: PortraitSegmentationResult?,
+    val handledByOemExtension: Boolean = false
+)
+

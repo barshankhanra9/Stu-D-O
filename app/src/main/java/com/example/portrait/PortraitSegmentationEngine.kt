@@ -84,6 +84,35 @@ object PortraitSegmentationEngine {
         focusY: Float? = null,
         hardwareDepthFrame: HardwareDepthFrame? = null
     ): PortraitSegmentationResult {
+        return finishSegmentationWithRawAlpha(
+            uprightBitmap = uprightBitmap,
+            isPreviewStream = isPreviewStream,
+            focusX = focusX,
+            focusY = focusY,
+            hardwareDepthFrame = hardwareDepthFrame,
+            precomputedRawAlpha = null,
+            precomputedWidth = 0,
+            precomputedHeight = 0,
+            requestedTier = null
+        )
+    }
+
+    /**
+     * Completes Guided Filter edge refinement, multi-subject extraction, and continuous/hardware depth mapping
+     * starting from either a precomputed AI mask (e.g. SubjectSegmentation Tier 3 or SelfieSegmentation Tier 4)
+     * or falling back automatically to bundled SelfieSegmentation -> software cue segmentation.
+     */
+    internal fun finishSegmentationWithRawAlpha(
+        uprightBitmap: Bitmap,
+        isPreviewStream: Boolean,
+        focusX: Float? = null,
+        focusY: Float? = null,
+        hardwareDepthFrame: HardwareDepthFrame? = null,
+        precomputedRawAlpha: FloatArray? = null,
+        precomputedWidth: Int = 0,
+        precomputedHeight: Int = 0,
+        requestedTier: com.example.model.PortraitCaptureTier? = null
+    ): PortraitSegmentationResult {
         val targetMaxDim = if (isPreviewStream) 224 else 384
         val scale = min(
             1f,
@@ -100,8 +129,24 @@ object PortraitSegmentationEngine {
         val workPixels = IntArray(workW * workH)
         workBmp.getPixels(workPixels, 0, workW, 0, 0, workW, workH)
 
-        // Step 1: Attempt ML Kit on-device segmentation
-        var rawAlpha: FloatArray? = tryMlKitSegmentation(workBmp, workW, workH, isPreviewStream)
+        // Step 1: Use precomputed mask (e.g. Tier 3 SubjectSegmentation) or attempt bundled ML Kit Selfie Segmentation
+        var resolvedTier: com.example.model.PortraitCaptureTier
+        var rawAlpha: FloatArray? = if (
+            precomputedRawAlpha != null &&
+            precomputedWidth > 0 &&
+            precomputedHeight > 0 &&
+            precomputedRawAlpha.size >= precomputedWidth * precomputedHeight
+        ) {
+            resolvedTier = requestedTier ?: com.example.model.PortraitCaptureTier.MLKIT_SUBJECT_SEGMENTATION
+            if (precomputedWidth == workW && precomputedHeight == workH) {
+                precomputedRawAlpha
+            } else {
+                resampleFloatArrayBilinear(precomputedRawAlpha, precomputedWidth, precomputedHeight, workW, workH)
+            }
+        } else {
+            resolvedTier = com.example.model.PortraitCaptureTier.MLKIT_SELFIE_SEGMENTATION
+            tryMlKitSegmentation(workBmp, workW, workH, isPreviewStream)
+        }
 
         // Step 2: Detect multiple faces cleanly for multi-subject priors & depth ordering
         val detectedFaces = detectSubjectsWithAndroidFaceDetector(workBmp, workW, workH)
@@ -110,6 +155,7 @@ object PortraitSegmentationEngine {
         // execute multi-cue software fallback segmentation
         val usedSoftwareFallback = (rawAlpha == null)
         if (rawAlpha == null) {
+            resolvedTier = com.example.model.PortraitCaptureTier.SOFTWARE_FALLBACK
             rawAlpha = segmentSoftwareFallback(
                 pixels = workPixels,
                 width = workW,
@@ -160,6 +206,7 @@ object PortraitSegmentationEngine {
             depthMap = fused
             focusDepth = fDepth
             depthSource = if (usedSoftwareFallback) PortraitDepthSource.HARDWARE_DEPTH else PortraitDepthSource.HYBRID
+            resolvedTier = com.example.model.PortraitCaptureTier.HARDWARE_DEPTH16
         } else {
             val (computedDepth, fDepth) = buildContinuousSoftwareDepthMap(
                 alphaMatte = refinedAlpha,
@@ -187,7 +234,8 @@ object PortraitSegmentationEngine {
             subjectCount = subjectCount,
             hasSubject = hasSubject,
             source = depthSource,
-            subjects = subjects
+            subjects = subjects,
+            captureTier = resolvedTier
         )
     }
 

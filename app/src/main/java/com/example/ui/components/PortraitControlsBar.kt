@@ -35,7 +35,10 @@ import androidx.compose.ui.unit.sp
 import com.example.R
 import com.example.model.CameraUiState
 import com.example.model.PortraitApertureFormatter
+import com.example.model.PortraitCaptureTier
 import com.example.model.PortraitDepthSource
+import com.example.model.PortraitPreviewStrategy
+import com.example.model.PortraitSubjectModelStatus
 import com.example.ui.theme.GlassCoolBlueSpecular
 import com.example.ui.theme.GlassObsidianBottom
 import com.example.ui.theme.GlassObsidianTop
@@ -69,10 +72,18 @@ fun PortraitControlsBar(
     val fStopText = PortraitApertureFormatter.formatFStop(uiState.portraitBlurIntensity)
     val blurPct = (uiState.portraitBlurIntensity * 100f).roundToInt().coerceIn(0, 100)
 
-    val depthBadgeText = when (uiState.portraitDepthSource) {
-        PortraitDepthSource.HARDWARE_DEPTH -> stringResource(R.string.portrait_depth_hardware)
-        PortraitDepthSource.HYBRID -> stringResource(R.string.portrait_depth_hybrid)
-        PortraitDepthSource.AI_SEGMENTATION -> stringResource(R.string.portrait_depth_ai)
+    val depthBadgeText = when {
+        uiState.portraitPreviewStrategy == PortraitPreviewStrategy.NATIVE_OEM_BOKEH ||
+            uiState.portraitCaptureTier == PortraitCaptureTier.CAMERA_X_BOKEH ->
+            stringResource(R.string.portrait_tier_oem_bokeh)
+        uiState.portraitDepthSource == PortraitDepthSource.HARDWARE_DEPTH ->
+            stringResource(R.string.portrait_depth_hardware)
+        uiState.portraitDepthSource == PortraitDepthSource.HYBRID ->
+            stringResource(R.string.portrait_depth_hybrid)
+        uiState.portraitSubjectModelStatus == PortraitSubjectModelStatus.READY ||
+            uiState.portraitCaptureTier == PortraitCaptureTier.MLKIT_SUBJECT_SEGMENTATION ->
+            stringResource(R.string.portrait_tier_subject_ai)
+        else -> stringResource(R.string.portrait_depth_ai)
     }
 
     val subjectText = when {
@@ -257,6 +268,69 @@ fun PortraitControlsBar(
                         maxLines = 1,
                         softWrap = false
                     )
+                }
+            }
+        }
+
+        // Subtle watchdog / model download badge when live shader pauses on low-end devices
+        // or while Subject Segmentation GMS module finishes downloading asynchronously
+        if (uiState.isPortraitLiveBlurPausedByWatchdog ||
+            uiState.portraitSubjectModelStatus == PortraitSubjectModelStatus.DOWNLOADING
+        ) {
+            Spacer(modifier = Modifier.height(6.dp))
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(6.dp, Alignment.CenterHorizontally),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                if (uiState.isPortraitLiveBlurPausedByWatchdog) {
+                    Box(
+                        modifier = Modifier
+                            .liquidGlassChipSurface(
+                                shape = RoundedCornerShape(10.dp),
+                                cornerRadius = 10.dp,
+                                isActive = true,
+                                accentColor = StuDOAmber,
+                                activeFillAlpha = 0.16f
+                            )
+                            .padding(horizontal = 9.dp, vertical = 3.dp)
+                            .testTag("portrait_watchdog_badge")
+                    ) {
+                        Text(
+                            text = stringResource(R.string.portrait_watchdog_badge),
+                            color = StuDOAmber,
+                            fontSize = 10.sp,
+                            fontWeight = FontWeight.Medium,
+                            maxLines = 1,
+                            softWrap = false
+                        )
+                    }
+                }
+                if (uiState.portraitSubjectModelStatus == PortraitSubjectModelStatus.DOWNLOADING) {
+                    Box(
+                        modifier = Modifier
+                            .liquidGlassChipSurface(
+                                shape = RoundedCornerShape(10.dp),
+                                cornerRadius = 10.dp,
+                                isActive = true,
+                                accentColor = GlassCoolBlueSpecular,
+                                activeFillAlpha = 0.14f
+                            )
+                            .padding(horizontal = 8.dp, vertical = 3.dp)
+                            .testTag("portrait_subject_download_badge")
+                    ) {
+                        Text(
+                            text = stringResource(
+                                R.string.portrait_model_downloading,
+                                uiState.portraitSubjectModelProgress
+                            ),
+                            color = GlassCoolBlueSpecular,
+                            fontSize = 10.sp,
+                            fontWeight = FontWeight.Medium,
+                            maxLines = 1,
+                            softWrap = false
+                        )
+                    }
                 }
             }
         }

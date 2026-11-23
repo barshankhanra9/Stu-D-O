@@ -72,6 +72,19 @@ android {
     includeInApk = false
     includeInBundle = true
   }
+
+  // Optional ABI split configuration for lean GitHub APK releases (pass -PenableAbiSplits=true)
+  val enableAbiSplits = providers.gradleProperty("enableAbiSplits")
+    .map { it.equals("true", ignoreCase = true) }
+    .getOrElse(false)
+  splits {
+    abi {
+      isEnable = enableAbiSplits
+      reset()
+      include("arm64-v8a", "armeabi-v7a")
+      isUniversalApk = true
+    }
+  }
 }
 
 // Configure the Secrets Gradle Plugin to use .env and .env.example files
@@ -93,6 +106,7 @@ dependencies {
   implementation(libs.androidx.activity.compose)
   implementation(libs.androidx.camera.camera2)
   implementation(libs.androidx.camera.core)
+  implementation(libs.androidx.camera.extensions)
   implementation(libs.androidx.camera.lifecycle)
   implementation(libs.androidx.camera.view)
   implementation(libs.androidx.camera.video)
@@ -129,6 +143,8 @@ dependencies {
   implementation(libs.kotlinx.coroutines.android)
   implementation(libs.kotlinx.coroutines.core)
   implementation(libs.mlkit.segmentation.selfie)
+  implementation(libs.mlkit.subject.segmentation)
+  implementation(libs.play.services.base)
   // implementation(libs.logging.interceptor)
   // implementation(libs.moshi.kotlin)
   // implementation(libs.okhttp)
