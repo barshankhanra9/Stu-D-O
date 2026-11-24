@@ -79,22 +79,26 @@ object VideoEncoderUtil {
                         val videoCaps = caps.videoCapabilities ?: continue
                         val widths = videoCaps.supportedWidths
                         val heights = videoCaps.supportedHeights
-                        val testW = when {
-                            widths.contains(1280) && heights.contains(720) && videoCaps.isSizeSupported(1280, 720) -> 1280
-                            widths.contains(640) && heights.contains(480) && videoCaps.isSizeSupported(640, 480) -> 640
-                            else -> widths.lower
-                        }
-                        val testH = when (testW) {
-                            1280 -> 720
-                            640 -> 480
-                            else -> heights.lower
-                        }
-                        val testBitrate = videoCaps.bitrateRange?.clamp(3_000_000) ?: 3_000_000
+                        val candidates = listOf(
+                            Triple(1280, 720, 30),
+                            Triple(640, 480, 30),
+                            Triple(1280, 720, 24),
+                            Triple(640, 480, 24),
+                            Triple(widths.lower, heights.lower, 30),
+                            Triple(widths.lower, heights.lower, 24)
+                        ).distinct()
 
-                        if (verifyEncoderConfiguration(codecInfo.name, mime, testW, testH, 30, testBitrate)) {
-                            hasValidConfiguration = true
-                            break
+                        for ((testW, testH, testFps) in candidates) {
+                            if (!widths.contains(testW) || !heights.contains(testH)) continue
+                            if (!videoCaps.isSizeSupported(testW, testH)) continue
+                            val nominal = calculateNominalBitrate(testW, testH, testFps)
+                            val testBitrate = videoCaps.bitrateRange?.clamp(nominal) ?: nominal
+                            if (verifyEncoderConfiguration(codecInfo.name, mime, testW, testH, testFps, testBitrate)) {
+                                hasValidConfiguration = true
+                                break
+                            }
                         }
+                        if (hasValidConfiguration) break
                     } catch (_: Throwable) {}
                 }
 

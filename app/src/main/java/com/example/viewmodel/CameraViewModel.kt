@@ -400,9 +400,27 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
                 val effectiveFocalMm = resolveEffectiveFocalLengthMm(cap.primaryFocalLengthMm)
                 val effectiveFocalText = com.example.util.CameraMetadataUtil.formatFocalLengthMm(effectiveFocalMm)
 
+                val isVideoActiveWithCapture = _uiState.value.cameraMode == CameraMode.VIDEO &&
+                    activeCamera != null &&
+                    activeVideoCapture != null
                 val isVideoBoundWithoutCapture = _uiState.value.cameraMode == CameraMode.VIDEO &&
                     activeCamera != null &&
                     activeVideoCapture == null
+
+                val effectiveSupportedQualities = if (cap.supportedVideoQualities.isNotEmpty()) {
+                    cap.supportedVideoQualities
+                } else if (isVideoActiveWithCapture) {
+                    listOf(VideoQualityOption.QUALITY_1080P, VideoQualityOption.QUALITY_720P, VideoQualityOption.QUALITY_480P)
+                } else {
+                    emptyList()
+                }
+                val effectiveSupportedFps = if (validFps.isNotEmpty()) {
+                    validFps
+                } else if (isVideoActiveWithCapture) {
+                    listOf(VideoFpsOption.FPS_AUTO, VideoFpsOption.FPS_30)
+                } else {
+                    emptyList()
+                }
 
                 val isHwDepthSupported = cap.isDepthOutputSupported || cap.depth16Sizes.isNotEmpty()
                 val effectiveDepthSource = if (isHwDepthSupported) {
@@ -424,14 +442,18 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
                         availableResolutionOptions = options,
                         activeResolutionOption = activeOpt,
                         targetCaptureSize = targetSize,
-                        supportedVideoQualities = cap.supportedVideoQualities,
-                        supportedVideoFps = validFps,
+                        supportedVideoQualities = effectiveSupportedQualities,
+                        supportedVideoFps = effectiveSupportedFps,
                         supportedFpsPerQuality = cap.supportedFpsPerQuality,
                         supportedVideoCodecs = supportedCodecs,
                         supportedVideoAspectRatios = supportedVideoRatios,
                         videoAspectRatio = effectiveVideoRatio,
                         videoCodec = effectiveCodec,
-                        isVideoRecordingSupported = if (isVideoBoundWithoutCapture) false else cap.isVideoRecordingSupported,
+                        isVideoRecordingSupported = when {
+                            isVideoActiveWithCapture -> true
+                            isVideoBoundWithoutCapture -> false
+                            else -> cap.isVideoRecordingSupported
+                        },
                         isVideoStabilizationSupported = cap.isVideoStabilizationSupported,
                         videoQuality = effectiveQuality,
                         videoFps = effectiveFps,

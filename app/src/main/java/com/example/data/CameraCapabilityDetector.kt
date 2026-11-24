@@ -547,9 +547,11 @@ class CameraCapabilityDetector(private val context: Context) {
         val detectedVideoQualities = mutableListOf<VideoQualityOption>()
         val fpsMap = mutableMapOf<VideoQualityOption, List<VideoFpsOption>>()
 
-        // Check MediaRecorder and SurfaceTexture output sizes first to avoid legacy CamcorderProfile false negatives & logcat spam
-        val recorderSizes = standardMap?.getOutputSizes(android.media.MediaRecorder::class.java)
-            ?: standardMap?.getOutputSizes(android.graphics.SurfaceTexture::class.java)
+        // Check MediaRecorder, SurfaceTexture, and PRIVATE output sizes to avoid legacy CamcorderProfile false negatives
+        val mrSizes = standardMap?.getOutputSizes(android.media.MediaRecorder::class.java)?.takeIf { it.isNotEmpty() }
+        val stSizes = standardMap?.getOutputSizes(android.graphics.SurfaceTexture::class.java)?.takeIf { it.isNotEmpty() }
+        val privSizes = standardMap?.getOutputSizes(ImageFormat.PRIVATE)?.takeIf { it.isNotEmpty() }
+        val recorderSizes = mrSizes ?: stSizes ?: privSizes
         val highSpeedVideoSizes = try {
             standardMap?.highSpeedVideoSizes ?: emptyArray()
         } catch (_: Throwable) {
@@ -574,7 +576,7 @@ class CameraCapabilityDetector(private val context: Context) {
                         highSpeedFpsRanges.any { it.upper >= 120 }
                     hasAe120 || hasHs120
                 }
-                else -> fpsRanges.any { it.upper >= fps }
+                else -> fpsRanges.isEmpty() || fpsRanges.any { it.upper >= fps }
             }
             if (!cameraSupportsTargetFps) {
                 return false
@@ -593,7 +595,12 @@ class CameraCapabilityDetector(private val context: Context) {
             }
 
             // 4. Video encoder resolution, rate, bitrate, and configuration verification
-            return com.example.util.VideoEncoderUtil.isResolutionAndFpsSupported(width, height, fps)
+            return if (fps == 0) {
+                com.example.util.VideoEncoderUtil.isResolutionAndFpsSupported(width, height, 30) ||
+                    com.example.util.VideoEncoderUtil.isResolutionAndFpsSupported(width, height, 24)
+            } else {
+                com.example.util.VideoEncoderUtil.isResolutionAndFpsSupported(width, height, fps)
+            }
         }
 
         val qualitySpecs = listOf(
@@ -605,13 +612,18 @@ class CameraCapabilityDetector(private val context: Context) {
 
         for ((opt, w, h) in qualitySpecs) {
             val is30Ok = isCameraAndEncoderFpsSupported(w, h, 30)
-            if (is30Ok) {
+            val isAutoFallbackOk = !is30Ok &&
+                fpsRanges.none { it.upper >= 30 } &&
+                isCameraAndEncoderFpsSupported(w, h, 0)
+            if (is30Ok || isAutoFallbackOk) {
                 detectedVideoQualities.add(opt)
                 val fpsList = mutableListOf(VideoFpsOption.FPS_AUTO)
                 if (is24Supported && isCameraAndEncoderFpsSupported(w, h, 24)) {
                     fpsList.add(VideoFpsOption.FPS_24)
                 }
-                fpsList.add(VideoFpsOption.FPS_30)
+                if (is30Ok) {
+                    fpsList.add(VideoFpsOption.FPS_30)
+                }
                 if (is60Supported && isCameraAndEncoderFpsSupported(w, h, 60)) {
                     fpsList.add(VideoFpsOption.FPS_60)
                 }

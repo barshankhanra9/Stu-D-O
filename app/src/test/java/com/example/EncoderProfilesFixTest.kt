@@ -91,7 +91,8 @@ class EncoderProfilesFixTest {
     private fun createFakeCameraInfoInternal(
         cameraId: String,
         provider: EncoderProfilesProvider,
-        supportedDynamicRanges: Set<DynamicRange> = setOf(DynamicRange.SDR)
+        supportedDynamicRanges: Set<DynamicRange> = setOf(DynamicRange.SDR),
+        supportedResolutions: List<Size> = emptyList()
     ): CameraInfoInternal {
         val iface = CameraInfoInternal::class.java
         return Proxy.newProxyInstance(
@@ -110,6 +111,7 @@ class EncoderProfilesFixTest {
                         supportedDynamicRanges.filter { it in requested }.toSet()
                     }
                 }
+                "getSupportedResolutions" -> supportedResolutions
                 "getCameraQuirks" -> Quirks(emptyList())
                 "getImplementation" -> proxy
                 "getLensFacing" -> CameraSelector.LENS_FACING_BACK
@@ -275,5 +277,36 @@ class EncoderProfilesFixTest {
             "Expected zero CapabilitiesByQuality error logs, got: $logs",
             logs.none { it.msg.contains("No supported EncoderProfiles") }
         )
+    }
+
+    @Test
+    fun `empty EncoderProfilesProvider with valid stream sizes falls back to CODEC_CAPABILITIES cleanly`() {
+        val cameraInfo = createFakeCameraInfoInternal(
+            cameraId = "test_codec_fallback",
+            provider = EncoderProfilesProvider.EMPTY,
+            supportedResolutions = listOf(
+                Size(1920, 1080),
+                Size(1280, 720),
+                Size(640, 480)
+            )
+        )
+
+        assertFalse(hasValidatedCamcorderEncoderProfiles(context, cameraInfo, "test_codec_fallback"))
+        val probe = probeCameraXVideoCapabilities(context, cameraInfo)
+        assertEquals(Recorder.VIDEO_CAPABILITIES_SOURCE_CODEC_CAPABILITIES, probe.capabilitiesSource)
+        assertTrue("Expected non-empty qualities from codec capabilities fallback", probe.supportedQualities.isNotEmpty())
+        assertTrue(probe.supportedQualities.contains(Quality.HD))
+
+        val recorder = Recorder.Builder()
+            .setVideoCapabilitiesSource(probe.capabilitiesSource)
+            .build()
+        val sdrOutput = com.example.ui.components.SdrScopedVideoOutput(recorder)
+        val mediaCaps = sdrOutput.getMediaCapabilities(cameraInfo, 0)
+        assertTrue(mediaCaps.getSupportedQualities(DynamicRange.SDR).contains(Quality.HD))
+
+        val videoCapture = VideoCapture.Builder(sdrOutput)
+            .setDynamicRange(DynamicRange.SDR)
+            .build()
+        assertEquals(DynamicRange.SDR, videoCapture.dynamicRange)
     }
 }

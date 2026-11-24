@@ -308,9 +308,10 @@ fun CameraTopBar(
                     }
                 }
 
-                // In PRO mode or when RAW is active, show interactive RAW / JPEG format selector
+                // In PRO mode or when RAW is active (excluding Portrait mode, which only captures JPEG),
+                // show interactive RAW / JPEG format selector
                 val isPro = uiState.cameraMode == CameraMode.PRO
-                if (isPro || uiState.rawCaptureMode != RawCaptureMode.OFF) {
+                if (uiState.cameraMode != CameraMode.PORTRAIT && (isPro || uiState.rawCaptureMode != RawCaptureMode.OFF)) {
                     val rawLabel = when (uiState.rawCaptureMode) {
                         RawCaptureMode.OFF -> "JPEG"
                         RawCaptureMode.DNG_ONLY -> "RAW"

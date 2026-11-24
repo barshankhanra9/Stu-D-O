@@ -85,6 +85,20 @@ class LiquidGlassUiTest {
         composeTestRule.onNodeWithTag("flash_toggle_button").assertIsDisplayed()
         composeTestRule.onNodeWithTag("top_settings_button").assertIsDisplayed()
 
+        // Switch to PORTRAIT mode with RAW+JPG active -> RAW/RAW+ badge must NOT appear beside STU•D•O logo
+        state = state.copy(
+            cameraMode = CameraMode.PORTRAIT,
+            rawCaptureMode = RawCaptureMode.JPEG_AND_DNG
+        )
+        composeTestRule.waitForIdle()
+        composeTestRule.onNodeWithTag("app_brand_text").assertIsDisplayed()
+        composeTestRule.onNodeWithTag("top_portrait_aperture_badge").assertIsDisplayed()
+        composeTestRule.onNodeWithTag("raw_format_toggle_button").assertDoesNotExist()
+
+        state = state.copy(rawCaptureMode = RawCaptureMode.DNG_ONLY)
+        composeTestRule.waitForIdle()
+        composeTestRule.onNodeWithTag("raw_format_toggle_button").assertDoesNotExist()
+
         // Switch to VIDEO mode without EIS support -> EIS must NOT appear
         state = state.copy(
             cameraMode = CameraMode.VIDEO,
