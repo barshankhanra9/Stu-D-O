@@ -369,7 +369,9 @@ class PrivateOriginalStorageManager(context: Context) {
             activeProtectedIds.remove(originalId)
             val entry = originals.remove(originalId)
             if (entry != null) {
-                try { File(storageDir, entry.fileName).delete() } catch (_: Throwable) {}
+                resolveConfinedStorageFile(entry.fileName)?.let { f ->
+                    try { f.delete() } catch (_: Throwable) {}
+                }
             }
             val staleLinks = links.values.filter { it.originalId == originalId }.map { it.galleryUri }
             for (k in staleLinks) {
@@ -429,7 +431,7 @@ class PrivateOriginalStorageManager(context: Context) {
                 return@synchronized Triple(null, null, null)
             }
             val entry = originals[link.originalId]
-            val file = entry?.let { File(storageDir, it.fileName) }
+            val file = entry?.let { resolveConfinedStorageFile(it.fileName) }
             Triple(link, entry, file)
         }
 
@@ -510,10 +512,10 @@ class PrivateOriginalStorageManager(context: Context) {
                 if (candidate.originalId == protectedOriginalId || activeProtectedIds.contains(candidate.originalId)) {
                     continue
                 }
-                val file = File(storageDir, candidate.fileName)
-                val actualLen = if (file.exists()) file.length() else candidate.fileSizeBytes
-                val deleted = if (file.exists()) file.delete() else true
-                if (deleted || !file.exists()) {
+                val file = resolveConfinedStorageFile(candidate.fileName)
+                val actualLen = if (file != null && file.exists()) file.length() else candidate.fileSizeBytes
+                val deleted = if (file != null && file.exists()) file.delete() else true
+                if (deleted || file == null || !file.exists()) {
                     originals.remove(candidate.originalId)
                     val staleLinks = links.values.filter { it.originalId == candidate.originalId }.map { it.galleryUri }
                     for (k in staleLinks) {
@@ -544,9 +546,9 @@ class PrivateOriginalStorageManager(context: Context) {
             var freedBytes = 0L
             val toRemove = originals.values.filterNot { activeProtectedIds.contains(it.originalId) }
             for (entry in toRemove) {
-                val file = File(storageDir, entry.fileName)
-                val size = if (file.exists()) file.length() else entry.fileSizeBytes
-                if (!file.exists() || file.delete()) {
+                val file = resolveConfinedStorageFile(entry.fileName)
+                val size = if (file != null && file.exists()) file.length() else entry.fileSizeBytes
+                if (file == null || !file.exists() || file.delete()) {
                     originals.remove(entry.originalId)
                     val staleLinks = links.values.filter { it.originalId == entry.originalId }.map { it.galleryUri }
                     for (k in staleLinks) {
@@ -604,8 +606,8 @@ class PrivateOriginalStorageManager(context: Context) {
     ): PostCaptureExportResult = withContext(Dispatchers.IO) {
         val originalEntry = synchronized(lock) { originals[originalId] }
             ?: return@withContext PostCaptureExportResult.Failure("Private clean original is unavailable.")
-        val originalFile = File(storageDir, originalEntry.fileName)
-        if (!originalFile.exists() || originalFile.length() <= 0L) {
+        val originalFile = resolveConfinedStorageFile(originalEntry.fileName)
+        if (originalFile == null || !originalFile.exists() || originalFile.length() <= 0L) {
             return@withContext PostCaptureExportResult.Failure("Private clean original file is missing.")
         }
 
@@ -633,7 +635,7 @@ class PrivateOriginalStorageManager(context: Context) {
             linkGalleryOutput(galleryUri, originalId, config)
             PostCaptureExportResult.Success(galleryUri, w, h, bytes)
         } catch (t: Throwable) {
-            android.util.Log.e(TAG, "updateExistingGalleryPhoto failed: ${t.message}", t)
+            android.util.Log.e(TAG, "updateExistingGalleryPhoto failed (${t.javaClass.simpleName})")
             PostCaptureExportResult.Failure(t.localizedMessage ?: "Failed updating photo.")
         } finally {
             unmarkOriginalActive(originalId)
@@ -647,8 +649,8 @@ class PrivateOriginalStorageManager(context: Context) {
     ): PostCaptureExportResult = withContext(Dispatchers.IO) {
         val originalEntry = synchronized(lock) { originals[originalId] }
             ?: return@withContext PostCaptureExportResult.Failure("Private clean original is unavailable.")
-        val originalFile = File(storageDir, originalEntry.fileName)
-        if (!originalFile.exists() || originalFile.length() <= 0L) {
+        val originalFile = resolveConfinedStorageFile(originalEntry.fileName)
+        if (originalFile == null || !originalFile.exists() || originalFile.length() <= 0L) {
             return@withContext PostCaptureExportResult.Failure("Private clean original file is missing.")
         }
 
@@ -952,10 +954,22 @@ class PrivateOriginalStorageManager(context: Context) {
         }
     }
 
+    private fun resolveConfinedStorageFile(fileName: String?): File? {
+        if (fileName.isNullOrBlank()) return null
+        if (fileName.contains('/') || fileName.contains('\\') || fileName.contains("..")) return null
+        return try {
+            val baseCanonical = storageDir.canonicalFile.path + File.separator
+            val candidate = File(storageDir, fileName).canonicalFile
+            if (!candidate.path.startsWith(baseCanonical) || candidate.isDirectory) null else candidate
+        } catch (_: Throwable) {
+            null
+        }
+    }
+
     private fun pruneMissingEntriesLocked() {
         val missingIds = originals.values.filter { entry ->
-            val f = File(storageDir, entry.fileName)
-            !f.exists() || f.length() <= 0L
+            val f = resolveConfinedStorageFile(entry.fileName)
+            f == null || !f.exists() || f.length() <= 0L
         }.map { it.originalId }
 
         if (missingIds.isNotEmpty()) {
@@ -983,7 +997,7 @@ class PrivateOriginalStorageManager(context: Context) {
                 val obj = origArr.optJSONObject(i) ?: continue
                 val id = obj.optString("originalId")
                 val fileName = obj.optString("fileName")
-                if (id.isBlank() || fileName.isBlank()) continue
+                if (id.isBlank() || resolveConfinedStorageFile(fileName) == null) continue
                 val metaObj = obj.optJSONObject("metadata")
                 val meta = if (metaObj != null) metadataFromJson(metaObj) else RealCameraMetadata()
                 originals[id] = PrivateOriginalEntry(

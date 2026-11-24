@@ -1,18 +1,47 @@
 *.iml
 .gradle
+.gradle/
 .kotlin
 /local.properties
-/.idea/caches
-/.idea/libraries
-/.idea/modules.xml
-/.idea/workspace.xml
-/.idea/navEditor.xml
-/.idea/assetWizardSettings.xml
+local.properties
+/.idea/
+.idea/
 .DS_Store
 /build
+**/build/
 /captures
 .externalNativeBuild
 .cxx
-local.properties
+
+# Environment files & secrets (keep .env.example template)
 .env
+.env.*
+!.env.example
+google-services.json
+firebase-applet-config.json
+
+# Signing keystores & encoded credentials
 debug.keystore
+debug.keystore.base64
+my-upload-key.jks
+*.keystore
+*.jks
+*.p12
+*.pfx
+*.pem
+*.der
+*.crt
+*.key
+
+# Build outputs & packaged binaries
+.build-outputs/
+*.apk
+*.aab
+*.ap_
+*.dex
+
+# Temporary, profiling & log artifacts
+*.log
+*.hprof
+*.tmp
+*.bak

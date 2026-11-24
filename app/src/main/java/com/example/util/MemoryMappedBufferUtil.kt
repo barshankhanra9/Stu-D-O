@@ -132,7 +132,7 @@ object MemoryMappedBufferUtil {
                         }
                     }
                 } catch (e: Throwable) {
-                    Log.w(TAG, "FileChannel transferTo failed for DNG, trying stream fallback: ${e.message}")
+                    Log.w(TAG, "FileChannel transferTo failed for DNG, trying stream fallback (${e.javaClass.simpleName})")
                     copiedSuccessfully = false
                 }
             }
@@ -145,7 +145,7 @@ object MemoryMappedBufferUtil {
                 } ?: context.contentResolver.openOutputStream(targetUri)
 
                 if (outStream == null) {
-                    Log.e(TAG, "Unable to open output stream for DNG Uri: $targetUri")
+                    Log.e(TAG, "Unable to open output stream for DNG Uri")
                     return 0L
                 }
                 outStream.use { out ->
@@ -159,7 +159,7 @@ object MemoryMappedBufferUtil {
 
             return dngSize
         } catch (t: Throwable) {
-            Log.e(TAG, "Error in serializeDngToUri", t)
+            Log.e(TAG, "Error in serializeDngToUri (${t.javaClass.simpleName})")
             return 0L
         } finally {
             try { dngCreator.close() } catch (_: Throwable) {}

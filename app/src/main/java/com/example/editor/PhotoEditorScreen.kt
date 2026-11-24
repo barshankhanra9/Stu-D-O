@@ -123,6 +123,7 @@ fun PhotoEditorScreen(
     onDismiss: () -> Unit,
     onOpenWatermarkStudio: (PhotoEditSnapshot) -> Unit = {},
     isImportedPhoto: Boolean = false,
+    isSaveLocationEnabled: Boolean = true,
     pendingWatermarkResult: com.example.model.PendingEditorWatermarkResult? = null,
     onConsumeWatermarkResult: (Long) -> Unit = {},
     modifier: Modifier = Modifier
@@ -1067,7 +1068,8 @@ fun PhotoEditorScreen(
                             context = context,
                             sourceUri = sourceUri,
                             snapshot = currentSnapshot,
-                            isImportedPhoto = isImportedPhoto
+                            isImportedPhoto = isImportedPhoto,
+                            preserveLocationMetadata = isSaveLocationEnabled
                         )
                         isExporting = false
                         if (savedUri != null) {

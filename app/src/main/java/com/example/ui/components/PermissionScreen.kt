@@ -118,7 +118,9 @@ fun PermissionScreen(
                             Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
                             Uri.fromParts("package", context.packageName, null)
                         )
-                        context.startActivity(intent)
+                        try {
+                            context.startActivity(intent)
+                        } catch (_: android.content.ActivityNotFoundException) {}
                     },
                     colors = ButtonDefaults.buttonColors(
                         containerColor = StuDOWhite,

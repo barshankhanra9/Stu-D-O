@@ -280,7 +280,9 @@ fun PhotoPreviewDialog(
                     putExtra(Intent.EXTRA_STREAM, currentItem.uri)
                     addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
                 }
-                context.startActivity(Intent.createChooser(shareIntent, "Share Media"))
+                try {
+                    context.startActivity(Intent.createChooser(shareIntent, "Share Media"))
+                } catch (_: android.content.ActivityNotFoundException) {}
             },
             onOpenRecycleBin = onOpenRecycleBin,
             onRequestDelete = { showDeleteConfirm = true }

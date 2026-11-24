@@ -314,9 +314,9 @@ class PortraitSidecarStorage(context: Context) {
         return synchronized(lock) {
             val link = findLinkLocked(galleryUri) ?: return@synchronized false
             val entry = entries[link.sidecarId] ?: return@synchronized false
-            val clean = File(storageDir, entry.cleanFileName)
-            val matte = File(storageDir, entry.matteFileName)
-            val depth = File(storageDir, entry.depthFileName)
+            val clean = resolveConfinedSidecarFile(entry.cleanFileName) ?: return@synchronized false
+            val matte = resolveConfinedSidecarFile(entry.matteFileName) ?: return@synchronized false
+            val depth = resolveConfinedSidecarFile(entry.depthFileName) ?: return@synchronized false
             clean.exists() && clean.length() > 0L && matte.exists() && depth.exists()
         }
     }
@@ -325,18 +325,18 @@ class PortraitSidecarStorage(context: Context) {
         return synchronized(lock) {
             val link = findLinkLocked(galleryUri) ?: return@synchronized null
             val entry = entries[link.sidecarId] ?: return@synchronized null
-            val clean = File(storageDir, entry.cleanFileName)
-            val matte = File(storageDir, entry.matteFileName)
-            val depth = File(storageDir, entry.depthFileName)
+            val clean = resolveConfinedSidecarFile(entry.cleanFileName) ?: return@synchronized null
+            val matte = resolveConfinedSidecarFile(entry.matteFileName) ?: return@synchronized null
+            val depth = resolveConfinedSidecarFile(entry.depthFileName) ?: return@synchronized null
             if (!clean.exists() || clean.length() <= 0L || !matte.exists() || !depth.exists()) {
                 return@synchronized null
             }
             PostCapturePortraitTarget(
                 galleryUri = galleryUri,
                 originalId = entry.sidecarId,
-                originalFilePath = clean.absolutePath,
-                depthMapFilePath = depth.absolutePath,
-                alphaMatteFilePath = matte.absolutePath,
+                originalFilePath = clean.canonicalPath,
+                depthMapFilePath = depth.canonicalPath,
+                alphaMatteFilePath = matte.canonicalPath,
                 width = entry.width,
                 height = entry.height,
                 blurIntensity = entry.blurIntensity,
@@ -351,8 +351,8 @@ class PortraitSidecarStorage(context: Context) {
 
     fun loadSegmentationForTarget(target: PostCapturePortraitTarget): PortraitSegmentationResult? {
         val entry = synchronized(lock) { entries[target.originalId] } ?: return null
-        val matteFile = File(target.alphaMatteFilePath)
-        val depthFile = File(target.depthMapFilePath)
+        val matteFile = resolveConfinedSidecarPath(target.alphaMatteFilePath) ?: return null
+        val depthFile = resolveConfinedSidecarPath(target.depthMapFilePath) ?: return null
         val alpha = decodePngToFloatField(matteFile, entry.maskWidth, entry.maskHeight) ?: return null
         val depth = decodePngToFloatField(depthFile, entry.maskWidth, entry.maskHeight) ?: return null
         val focusDepth = HardwareDepthProcessor.sampleFocusDepth(
@@ -381,8 +381,8 @@ class PortraitSidecarStorage(context: Context) {
         newFocusY: Float,
         isSaveLocation: Boolean
     ): PostCaptureExportResult = withContext(Dispatchers.IO) {
-        val cleanFile = File(target.originalFilePath)
-        if (!cleanFile.exists() || cleanFile.length() <= 0L) {
+        val cleanFile = resolveConfinedSidecarPath(target.originalFilePath)
+        if (cleanFile == null || !cleanFile.exists() || cleanFile.length() <= 0L) {
             return@withContext PostCaptureExportResult.Failure("Original portrait image is unavailable.")
         }
         val segmentation = loadSegmentationForTarget(target)
@@ -421,8 +421,8 @@ class PortraitSidecarStorage(context: Context) {
         newFocusY: Float,
         isSaveLocation: Boolean
     ): PostCaptureExportResult = withContext(Dispatchers.IO) {
-        val cleanFile = File(target.originalFilePath)
-        if (!cleanFile.exists() || cleanFile.length() <= 0L) {
+        val cleanFile = resolveConfinedSidecarPath(target.originalFilePath)
+        if (cleanFile == null || !cleanFile.exists() || cleanFile.length() <= 0L) {
             return@withContext PostCaptureExportResult.Failure("Original portrait image is unavailable.")
         }
         val segmentation = loadSegmentationForTarget(target)
@@ -692,12 +692,35 @@ class PortraitSidecarStorage(context: Context) {
         }
     }
 
+    private fun resolveConfinedSidecarFile(fileName: String?): File? {
+        if (fileName.isNullOrBlank()) return null
+        if (fileName.contains('/') || fileName.contains('\\') || fileName.contains("..")) return null
+        return try {
+            val baseCanonical = storageDir.canonicalFile.path + File.separator
+            val candidate = File(storageDir, fileName).canonicalFile
+            if (!candidate.path.startsWith(baseCanonical) || candidate.isDirectory) null else candidate
+        } catch (_: Throwable) {
+            null
+        }
+    }
+
+    private fun resolveConfinedSidecarPath(rawPath: String?): File? {
+        if (rawPath.isNullOrBlank()) return null
+        return try {
+            val baseCanonical = storageDir.canonicalFile.path + File.separator
+            val candidate = File(rawPath).canonicalFile
+            if (!candidate.path.startsWith(baseCanonical) || candidate.isDirectory) null else candidate
+        } catch (_: Throwable) {
+            null
+        }
+    }
+
     private fun pruneMissingLocked() {
         val missing = entries.values.filter { entry ->
-            val f1 = File(storageDir, entry.cleanFileName)
-            val f2 = File(storageDir, entry.matteFileName)
-            val f3 = File(storageDir, entry.depthFileName)
-            !f1.exists() || !f2.exists() || !f3.exists()
+            val f1 = resolveConfinedSidecarFile(entry.cleanFileName)
+            val f2 = resolveConfinedSidecarFile(entry.matteFileName)
+            val f3 = resolveConfinedSidecarFile(entry.depthFileName)
+            f1 == null || f2 == null || f3 == null || !f1.exists() || !f2.exists() || !f3.exists()
         }.map { it.sidecarId }
         if (missing.isNotEmpty()) {
             for (id in missing) {
@@ -720,9 +743,9 @@ class PortraitSidecarStorage(context: Context) {
             for (u in staleLinks) links.remove(u)
             val stillRefClean = entries.values.any { it.cleanFileName == victim.cleanFileName }
             if (!stillRefClean) {
-                try { File(storageDir, victim.cleanFileName).delete() } catch (_: Throwable) {}
-                try { File(storageDir, victim.matteFileName).delete() } catch (_: Throwable) {}
-                try { File(storageDir, victim.depthFileName).delete() } catch (_: Throwable) {}
+                resolveConfinedSidecarFile(victim.cleanFileName)?.let { try { it.delete() } catch (_: Throwable) {} }
+                resolveConfinedSidecarFile(victim.matteFileName)?.let { try { it.delete() } catch (_: Throwable) {} }
+                resolveConfinedSidecarFile(victim.depthFileName)?.let { try { it.delete() } catch (_: Throwable) {} }
             }
         }
     }
@@ -740,7 +763,11 @@ class PortraitSidecarStorage(context: Context) {
                 val clean = obj.optString("cleanFileName")
                 val matte = obj.optString("matteFileName")
                 val depth = obj.optString("depthFileName")
-                if (id.isBlank() || clean.isBlank() || matte.isBlank() || depth.isBlank()) continue
+                if (id.isBlank() ||
+                    resolveConfinedSidecarFile(clean) == null ||
+                    resolveConfinedSidecarFile(matte) == null ||
+                    resolveConfinedSidecarFile(depth) == null
+                ) continue
                 val sourceStr = obj.optString("depthSource", PortraitDepthSource.AI_SEGMENTATION.name)
                 val source = PortraitDepthSource.values().firstOrNull { it.name == sourceStr }
                     ?: PortraitDepthSource.AI_SEGMENTATION

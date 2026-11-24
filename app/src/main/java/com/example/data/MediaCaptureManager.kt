@@ -637,7 +637,7 @@ class MediaCaptureManager(private val context: Context) {
     }
 
     fun startVideoRecording(
-        videoCapture: VideoCapture<Recorder>,
+        videoCapture: VideoCapture<*>,
         isAudioEnabled: Boolean = true,
         onEvent: (VideoRecordEvent) -> Unit
     ): Recording {
@@ -658,7 +658,11 @@ class MediaCaptureManager(private val context: Context) {
             MediaStore.Video.Media.EXTERNAL_CONTENT_URI
         ).setContentValues(contentValues).build()
 
-        val pendingRecording = videoCapture.output
+        val recorder = (videoCapture.output as? com.example.ui.components.SdrScopedVideoOutput)?.recorder
+            ?: (videoCapture.output as? Recorder)
+            ?: throw IllegalStateException("Unsupported VideoOutput: ${videoCapture.output}")
+
+        val pendingRecording = recorder
             .prepareRecording(context, mediaStoreOutputOptions)
 
         val hasAudioPermission = ContextCompat.checkSelfPermission(

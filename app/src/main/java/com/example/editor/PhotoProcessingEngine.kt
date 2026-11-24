@@ -128,7 +128,7 @@ object PhotoProcessingEngine {
                 rawBitmap
             }
         } catch (e: Exception) {
-            e.printStackTrace()
+            android.util.Log.w("PhotoProcessingEngine", "Preview load failed (${e.javaClass.simpleName})")
             null
         }
     }
@@ -967,7 +967,8 @@ object PhotoProcessingEngine {
         context: Context,
         sourceUri: Uri,
         snapshot: PhotoEditSnapshot,
-        isImportedPhoto: Boolean = false
+        isImportedPhoto: Boolean = false,
+        preserveLocationMetadata: Boolean = true
     ): Uri? = withContext(Dispatchers.IO) {
         try {
             val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
@@ -1115,64 +1116,87 @@ object PhotoProcessingEngine {
             }
 
             var savedUri: Uri? = null
+            var tempOutFile: java.io.File? = null
             try {
                 savedUri = context.contentResolver.insert(
                     MediaStore.Images.Media.EXTERNAL_CONTENT_URI,
                     contentValues
                 ) ?: return@withContext null
 
-                context.contentResolver.openOutputStream(savedUri)?.use { outStream ->
-                    val compressFormat = if (isPngSource) Bitmap.CompressFormat.PNG else Bitmap.CompressFormat.JPEG
-                    val ok = workingBitmap.compress(compressFormat, 100, outStream)
-                    outStream.flush()
-                    if (!ok) throw IllegalStateException("Compression failed for $savedUri ($outMimeType)")
-                } ?: throw IllegalStateException("Failed to open output stream for $savedUri")
+                if (isPngSource) {
+                    context.contentResolver.openOutputStream(savedUri)?.use { outStream ->
+                        val ok = workingBitmap.compress(Bitmap.CompressFormat.PNG, 100, outStream)
+                        outStream.flush()
+                        if (!ok) throw IllegalStateException("Compression failed ($outMimeType)")
+                    } ?: throw IllegalStateException("Failed to open output stream")
+                } else {
+                    tempOutFile = java.io.File.createTempFile("studo_edit_export_", ".jpg", context.cacheDir)
+                    java.io.BufferedOutputStream(java.io.FileOutputStream(tempOutFile), 64 * 1024).use { tempOut ->
+                        val ok = workingBitmap.compress(Bitmap.CompressFormat.JPEG, 100, tempOut)
+                        tempOut.flush()
+                        if (!ok) throw IllegalStateException("Compression failed ($outMimeType)")
+                    }
 
-                if (!isPngSource) {
                     try {
-                        val pfd = context.contentResolver.openFileDescriptor(savedUri, "rw")
-                        pfd?.use { fd ->
-                            val destExif = ExifInterface(fd.fileDescriptor)
-                            context.contentResolver.openInputStream(sourceUri)?.use { origStream ->
-                                val srcExif = ExifInterface(origStream)
-                                val tagsToCopy = arrayOf(
-                                    ExifInterface.TAG_DATETIME,
-                                    ExifInterface.TAG_DATETIME_ORIGINAL,
-                                    ExifInterface.TAG_DATETIME_DIGITIZED,
-                                    ExifInterface.TAG_SUBSEC_TIME_ORIGINAL,
-                                    ExifInterface.TAG_MAKE,
-                                    ExifInterface.TAG_MODEL,
-                                    ExifInterface.TAG_FOCAL_LENGTH,
-                                    ExifInterface.TAG_FOCAL_LENGTH_IN_35MM_FILM,
-                                    ExifInterface.TAG_F_NUMBER,
-                                    ExifInterface.TAG_EXPOSURE_TIME,
-                                    ExifInterface.TAG_EXPOSURE_BIAS_VALUE,
-                                    ExifInterface.TAG_ISO_SPEED_RATINGS,
-                                    ExifInterface.TAG_WHITE_BALANCE,
-                                    ExifInterface.TAG_FLASH,
-                                    ExifInterface.TAG_GPS_LATITUDE,
-                                    ExifInterface.TAG_GPS_LATITUDE_REF,
-                                    ExifInterface.TAG_GPS_LONGITUDE,
-                                    ExifInterface.TAG_GPS_LONGITUDE_REF,
-                                    ExifInterface.TAG_GPS_ALTITUDE,
-                                    ExifInterface.TAG_GPS_ALTITUDE_REF,
-                                    ExifInterface.TAG_GPS_TIMESTAMP,
-                                    ExifInterface.TAG_GPS_DATESTAMP
-                                )
-                                for (tag in tagsToCopy) {
+                        val destExif = ExifInterface(tempOutFile.absolutePath)
+                        context.contentResolver.openInputStream(sourceUri)?.use { origStream ->
+                            val srcExif = ExifInterface(origStream)
+                            val baseTagsToCopy = arrayOf(
+                                ExifInterface.TAG_DATETIME,
+                                ExifInterface.TAG_DATETIME_ORIGINAL,
+                                ExifInterface.TAG_DATETIME_DIGITIZED,
+                                ExifInterface.TAG_SUBSEC_TIME_ORIGINAL,
+                                ExifInterface.TAG_MAKE,
+                                ExifInterface.TAG_MODEL,
+                                ExifInterface.TAG_FOCAL_LENGTH,
+                                ExifInterface.TAG_FOCAL_LENGTH_IN_35MM_FILM,
+                                ExifInterface.TAG_F_NUMBER,
+                                ExifInterface.TAG_EXPOSURE_TIME,
+                                ExifInterface.TAG_EXPOSURE_BIAS_VALUE,
+                                ExifInterface.TAG_ISO_SPEED_RATINGS,
+                                ExifInterface.TAG_WHITE_BALANCE,
+                                ExifInterface.TAG_FLASH
+                            )
+                            for (tag in baseTagsToCopy) {
+                                val v = srcExif.getAttribute(tag)
+                                if (!v.isNullOrBlank()) destExif.setAttribute(tag, v)
+                            }
+                            val gpsTagsToCopy = arrayOf(
+                                ExifInterface.TAG_GPS_LATITUDE,
+                                ExifInterface.TAG_GPS_LATITUDE_REF,
+                                ExifInterface.TAG_GPS_LONGITUDE,
+                                ExifInterface.TAG_GPS_LONGITUDE_REF,
+                                ExifInterface.TAG_GPS_ALTITUDE,
+                                ExifInterface.TAG_GPS_ALTITUDE_REF,
+                                ExifInterface.TAG_GPS_TIMESTAMP,
+                                ExifInterface.TAG_GPS_DATESTAMP
+                            )
+                            if (preserveLocationMetadata) {
+                                for (tag in gpsTagsToCopy) {
                                     val v = srcExif.getAttribute(tag)
                                     if (!v.isNullOrBlank()) destExif.setAttribute(tag, v)
                                 }
+                            } else {
+                                for (tag in gpsTagsToCopy) {
+                                    destExif.setAttribute(tag, null)
+                                }
                             }
-                            destExif.setAttribute(ExifInterface.TAG_ORIENTATION, ExifInterface.ORIENTATION_NORMAL.toString())
-                            destExif.setAttribute(ExifInterface.TAG_IMAGE_WIDTH, finalWidth.toString())
-                            destExif.setAttribute(ExifInterface.TAG_IMAGE_LENGTH, finalHeight.toString())
-                            destExif.setAttribute(ExifInterface.TAG_SOFTWARE, "StuDO Professional Photo Studio")
-                            destExif.saveAttributes()
                         }
+                        destExif.setAttribute(ExifInterface.TAG_ORIENTATION, ExifInterface.ORIENTATION_NORMAL.toString())
+                        destExif.setAttribute(ExifInterface.TAG_IMAGE_WIDTH, finalWidth.toString())
+                        destExif.setAttribute(ExifInterface.TAG_IMAGE_LENGTH, finalHeight.toString())
+                        destExif.setAttribute(ExifInterface.TAG_SOFTWARE, "StuDO Professional Photo Studio")
+                        destExif.saveAttributes()
                     } catch (ex: Exception) {
-                        android.util.Log.w("PhotoProcessingEngine", "EXIF tag copy note: ${ex.message}")
+                        android.util.Log.w("PhotoProcessingEngine", "EXIF tag copy note (${ex.javaClass.simpleName})")
                     }
+
+                    context.contentResolver.openOutputStream(savedUri)?.use { outStream ->
+                        java.io.FileInputStream(tempOutFile).use { inStream ->
+                            inStream.copyTo(outStream, 64 * 1024)
+                        }
+                        outStream.flush()
+                    } ?: throw IllegalStateException("Failed to open output stream")
                 }
 
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
@@ -1186,14 +1210,15 @@ object PhotoProcessingEngine {
                 if (savedUri != null) {
                     try { context.contentResolver.delete(savedUri, null, null) } catch (_: Exception) {}
                 }
-                android.util.Log.e("PhotoProcessingEngine", "Failed to export edited photo", t)
+                android.util.Log.e("PhotoProcessingEngine", "Failed to export edited photo (${t.javaClass.simpleName})")
                 null
             } finally {
+                try { tempOutFile?.delete() } catch (_: Throwable) {}
                 if (!workingBitmap.isRecycled) workingBitmap.recycle()
                 com.example.util.WatermarkPainter.clearSampleCache()
             }
         } catch (t: Throwable) {
-            android.util.Log.e("PhotoProcessingEngine", "Export exception", t)
+            android.util.Log.e("PhotoProcessingEngine", "Export exception (${t.javaClass.simpleName})")
             null
         }
     }

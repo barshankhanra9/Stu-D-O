@@ -41,20 +41,66 @@ class RecycleBinManager(private val context: Context) {
     private val inFlightBinOps = mutableSetOf<String>()
 
     private val binRootDir: File by lazy {
-        File(context.filesDir, BIN_ROOT_DIR).apply { if (!exists()) mkdirs() }
+        File(context.filesDir, BIN_ROOT_DIR).apply {
+            if (!exists()) mkdirs()
+            ensureNoMedia(this)
+        }
     }
 
     private val mediaDir: File by lazy {
-        File(binRootDir, BIN_MEDIA_DIR).apply { if (!exists()) mkdirs() }
+        File(binRootDir, BIN_MEDIA_DIR).apply {
+            if (!exists()) mkdirs()
+            ensureNoMedia(this)
+        }
     }
 
     private val manifestFile: File by lazy {
         File(binRootDir, MANIFEST_FILE)
     }
 
+    private fun ensureNoMedia(dir: File) {
+        val nomedia = File(dir, ".nomedia")
+        if (!nomedia.exists()) {
+            try { nomedia.createNewFile() } catch (_: Throwable) {}
+        }
+    }
+
+    private fun resolveConfinedBinFile(rawPath: String?): File? {
+        if (rawPath.isNullOrBlank()) return null
+        return try {
+            val baseCanonical = mediaDir.canonicalFile.path + File.separator
+            val candidate = File(rawPath).canonicalFile
+            if (!candidate.path.startsWith(baseCanonical) || candidate.isDirectory) null else candidate
+        } catch (_: Throwable) {
+            null
+        }
+    }
+
+    private fun isSafeSourceUri(uri: Uri): Boolean {
+        val scheme = uri.scheme?.lowercase() ?: return false
+        if (scheme == "content") return true
+        if (scheme != "file") return false
+        val path = uri.path ?: return false
+        return try {
+            val targetCanonical = File(path).canonicalPath
+            val forbiddenRoots = listOfNotNull(
+                context.filesDir,
+                context.noBackupFilesDir,
+                context.filesDir.parentFile?.let { File(it, "shared_prefs") },
+                context.filesDir.parentFile?.let { File(it, "databases") }
+            )
+            forbiddenRoots.none { root ->
+                val rootPath = root.canonicalPath
+                targetCanonical == rootPath || targetCanonical.startsWith(rootPath + File.separator)
+            }
+        } catch (_: Throwable) {
+            false
+        }
+    }
+
     fun getBinItems(): List<BinMediaItem> = synchronized(lock) {
         loadManifestLocked()
-            .filter { File(it.binFilePath).exists() }
+            .filter { resolveConfinedBinFile(it.binFilePath)?.exists() == true }
             .sortedByDescending { it.deletedAtMillis }
     }
 
@@ -66,7 +112,8 @@ class RecycleBinManager(private val context: Context) {
         val safeName = item.displayName.ifBlank {
             if (item.isVideo) "StuDO_VID_${System.currentTimeMillis()}.$ext" else "StuDO_${System.currentTimeMillis()}.$ext"
         }
-        val destFile = File(mediaDir, "${binId}.$ext")
+        val destFile = resolveConfinedBinFile(File(mediaDir, "${binId}.$ext").path)
+            ?: return RecycleResult.Error("Invalid destination path for StuDO Bin")
 
         try {
             // 1. Copy bytes from MediaStore or local file URI into private Bin storage
@@ -87,7 +134,7 @@ class RecycleBinManager(private val context: Context) {
             val binItem = BinMediaItem(
                 id = binId,
                 originalUriString = item.uri.toString(),
-                binFilePath = destFile.absolutePath,
+                binFilePath = destFile.canonicalPath,
                 displayName = safeName,
                 mimeType = resolveMimeType(item, ext),
                 isVideo = item.isVideo,
@@ -102,7 +149,7 @@ class RecycleBinManager(private val context: Context) {
             synchronized(lock) {
                 val items = loadManifestLocked().toMutableList()
                 // Deduplicate by original URI if somehow retried
-                items.removeAll { it.originalUriString == binItem.originalUriString && !File(it.binFilePath).exists() }
+                items.removeAll { it.originalUriString == binItem.originalUriString && resolveConfinedBinFile(it.binFilePath)?.exists() != true }
                 items.add(0, binItem)
                 saveManifestLocked(items)
             }
@@ -129,8 +176,8 @@ class RecycleBinManager(private val context: Context) {
         }
 
         try {
-            val binFile = File(targetItem.binFilePath)
-            if (!binFile.exists() || binFile.length() <= 0L) {
+            val binFile = resolveConfinedBinFile(targetItem.binFilePath)
+            if (binFile == null || !binFile.exists() || binFile.length() <= 0L) {
                 removeEntryAndFile(binId, targetItem.binFilePath)
                 return RecycleResult.Error("Bin file is missing or corrupted")
             }
@@ -142,7 +189,7 @@ class RecycleBinManager(private val context: Context) {
             removeEntryAndFile(binId, targetItem.binFilePath)
             return RecycleResult.Restored(restoredUri, binId)
         } catch (t: Throwable) {
-            Log.e(TAG, "Failed restoring bin item $binId", t)
+            Log.e(TAG, "Failed restoring bin item (${t.javaClass.simpleName})")
             return RecycleResult.Error(t.localizedMessage ?: "Failed to restore item from StuDO Bin")
         } finally {
             synchronized(lock) { inFlightBinOps.remove(binId) }
@@ -165,8 +212,8 @@ class RecycleBinManager(private val context: Context) {
                 }
                 match?.binFilePath
             }
-            if (path != null) {
-                try { File(path).delete() } catch (_: Throwable) {}
+            resolveConfinedBinFile(path)?.let { confined ->
+                try { confined.delete() } catch (_: Throwable) {}
             }
             RecycleResult.PermanentlyDeleted(binId)
         } finally {
@@ -179,15 +226,17 @@ class RecycleBinManager(private val context: Context) {
             val items = loadManifestLocked()
             var removedCount = 0
             items.forEach { item ->
-                val file = File(item.binFilePath)
-                if (file.exists()) {
+                val file = resolveConfinedBinFile(item.binFilePath)
+                if (file != null && file.exists()) {
                     try { file.delete() } catch (_: Throwable) {}
                 }
                 removedCount++
             }
             saveManifestLocked(emptyList())
             mediaDir.listFiles()?.forEach { orphan ->
-                try { orphan.delete() } catch (_: Throwable) {}
+                if (orphan.name != ".nomedia") {
+                    try { orphan.delete() } catch (_: Throwable) {}
+                }
             }
             removedCount
         }
@@ -199,13 +248,16 @@ class RecycleBinManager(private val context: Context) {
             list.removeAll { it.id == binId }
             saveManifestLocked(list)
         }
-        try { File(filePath).delete() } catch (_: Throwable) {}
+        resolveConfinedBinFile(filePath)?.let { confined ->
+            try { confined.delete() } catch (_: Throwable) {}
+        }
     }
 
     private fun copyUriToFile(uri: Uri, destFile: File): Long {
+        if (!isSafeSourceUri(uri)) return 0L
         if (uri.scheme == "file" && !uri.path.isNullOrBlank()) {
             val src = File(uri.path!!)
-            if (!src.exists()) return 0L
+            if (!src.exists() || !src.isFile) return 0L
             src.inputStream().use { input ->
                 FileOutputStream(destFile).use { output ->
                     val copied = input.copyTo(output, BUFFER_SIZE)
@@ -225,6 +277,7 @@ class RecycleBinManager(private val context: Context) {
     }
 
     private fun deleteOriginalSource(mediaCaptureManager: MediaCaptureManager, uri: Uri): Boolean {
+        if (!isSafeSourceUri(uri)) return false
         if (uri.scheme == "file" && !uri.path.isNullOrBlank()) {
             val f = File(uri.path!!)
             return !f.exists() || f.delete()
@@ -300,8 +353,9 @@ class RecycleBinManager(private val context: Context) {
     }
 
     private fun resolveExtension(item: MediaItem): String {
-        val fromName = item.displayName.substringAfterLast('.', "").lowercase().trim()
-        if (fromName.isNotEmpty() && fromName.length <= 5) return fromName
+        val rawExt = item.displayName.substringAfterLast('.', "").lowercase().trim()
+        val fromName = rawExt.filter { it in 'a'..'z' || it in '0'..'9' }
+        if (fromName.isNotEmpty() && fromName.length <= 5 && fromName == rawExt) return fromName
         return when {
             item.isVideo || item.mimeType.startsWith("video/") -> "mp4"
             item.mimeType.equals("image/x-adobe-dng", ignoreCase = true) -> "dng"
@@ -331,11 +385,13 @@ class RecycleBinManager(private val context: Context) {
             val result = mutableListOf<BinMediaItem>()
             for (i in 0 until arr.length()) {
                 val obj = arr.optJSONObject(i) ?: continue
+                val binPath = obj.optString("binFilePath")
+                val confinedFile = resolveConfinedBinFile(binPath) ?: continue
                 result.add(
                     BinMediaItem(
                         id = obj.optString("id"),
                         originalUriString = obj.optString("originalUriString"),
-                        binFilePath = obj.optString("binFilePath"),
+                        binFilePath = confinedFile.canonicalPath,
                         displayName = obj.optString("displayName"),
                         mimeType = obj.optString("mimeType"),
                         isVideo = obj.optBoolean("isVideo", false),
@@ -351,7 +407,7 @@ class RecycleBinManager(private val context: Context) {
             }
             result
         } catch (t: Throwable) {
-            Log.e(TAG, "Error loading StuDO Bin manifest", t)
+            Log.e(TAG, "Error loading StuDO Bin manifest (${t.javaClass.simpleName})")
             emptyList()
         }
     }

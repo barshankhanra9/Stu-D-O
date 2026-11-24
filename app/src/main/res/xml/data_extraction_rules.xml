@@ -5,15 +5,15 @@
 -->
 <data-extraction-rules>
     <cloud-backup>
-        <!-- TODO: Use <include> and <exclude> to control what is backed up.
-        <include .../>
-        <exclude .../>
-        -->
+        <exclude domain="file" path="private_originals" />
+        <exclude domain="file" path="studo_bin" />
+        <exclude domain="file" path="portrait_sidecars" />
+        <exclude domain="sharedpref" path="studo_camera_preferences.xml" />
     </cloud-backup>
-    <!--
     <device-transfer>
-        <include .../>
-        <exclude .../>
+        <exclude domain="file" path="private_originals" />
+        <exclude domain="file" path="studo_bin" />
+        <exclude domain="file" path="portrait_sidecars" />
+        <exclude domain="sharedpref" path="studo_camera_preferences.xml" />
     </device-transfer>
-    -->
 </data-extraction-rules>

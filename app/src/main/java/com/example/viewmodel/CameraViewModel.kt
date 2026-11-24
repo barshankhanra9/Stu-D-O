@@ -96,7 +96,7 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
     private var activeCameraInfo: CameraInfo? = null
     private var activeCameraProvider: ProcessCameraProvider? = null
     private var activeImageCapture: ImageCapture? = null
-    private var activeVideoCapture: VideoCapture<Recorder>? = null
+    private var activeVideoCapture: VideoCapture<*>? = null
     private var activeRecording: Recording? = null
     private var isRecordingStarted: Boolean = false
     private var currentTargetRotation: Int = android.view.Surface.ROTATION_0
@@ -182,6 +182,9 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
         }
         refreshLensCapabilities()
         refreshRecycleBinState()
+        viewModelScope.launch(Dispatchers.IO) {
+            cleanupOrphanedExportTempFiles()
+        }
         viewModelScope.launch {
             portraitPipelineManager.status.collect { pStatus ->
                 _uiState.update { cur ->
@@ -260,7 +263,7 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
         camera: Camera,
         cameraProvider: ProcessCameraProvider,
         imageCapture: ImageCapture?,
-        videoCapture: VideoCapture<Recorder>?
+        videoCapture: VideoCapture<*>?
     ) {
         activeCamera = camera
         activeCameraControl = camera.cameraControl
@@ -2055,6 +2058,30 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
         } catch (_: Throwable) {}
     }
 
+    private fun cleanupOrphanedExportTempFiles() {
+        try {
+            val dir = appContext.cacheDir ?: return
+            val staleCutoffMs = System.currentTimeMillis() - 5L * 60L * 1000L
+            dir.listFiles()?.forEach { f ->
+                if (!f.isFile) return@forEach
+                val name = f.name
+                val isEditorWm = name.startsWith("studo_editor_watermark_") && name.endsWith(".jpg")
+                val isStaleExport = (
+                    name.startsWith("studo_clean_export_") ||
+                        name.startsWith("studo_wm_export_") ||
+                        name.startsWith("studo_portrait_export_") ||
+                        name.startsWith("studo_proc_") ||
+                        name.startsWith("mmap_in_") ||
+                        name.startsWith("mmap_out_") ||
+                        name.startsWith("zoom_src_")
+                    ) && f.lastModified() < staleCutoffMs
+                if (isEditorWm || isStaleExport) {
+                    f.delete()
+                }
+            }
+        } catch (_: Throwable) {}
+    }
+
     fun openWatermarkStudioFromEditor(snapshot: com.example.editor.PhotoEditSnapshot) {
         val currentUri = _uiState.value.editingPhotoUri ?: return
         val isImported = _uiState.value.isEditingPhotoImported
@@ -3164,6 +3191,7 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
         }
         try { mediaSound?.release() } catch (_: Throwable) {}
         mediaSound = null
+        cleanupEditorWatermarkTempFiles()
         portraitPipelineManager.onExitPortraitMode()
         mediaCaptureManager.shutdown()
         ultraResCaptureManager.shutdown()

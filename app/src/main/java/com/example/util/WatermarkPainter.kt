@@ -100,7 +100,34 @@ object WatermarkPainter {
 
     private val logoCache = LruCache<String, Bitmap>(16)
 
+    private fun isAllowedLogoUri(context: Context, uri: Uri): Boolean {
+        val scheme = uri.scheme?.lowercase(Locale.US) ?: return false
+        return when (scheme) {
+            "content", "android.resource" -> true
+            "file" -> {
+                val path = uri.path ?: return false
+                try {
+                    val target = java.io.File(path).canonicalPath
+                    val forbiddenRoots = listOfNotNull(
+                        context.filesDir,
+                        context.noBackupFilesDir,
+                        context.filesDir.parentFile?.let { java.io.File(it, "shared_prefs") },
+                        context.filesDir.parentFile?.let { java.io.File(it, "databases") }
+                    )
+                    forbiddenRoots.none { root ->
+                        val rootPath = root.canonicalPath
+                        target == rootPath || target.startsWith(rootPath + java.io.File.separator)
+                    }
+                } catch (_: Throwable) {
+                    false
+                }
+            }
+            else -> false
+        }
+    }
+
     private fun decodeSampledUriLogo(context: Context, uri: Uri, targetSize: Int): Bitmap? {
+        if (!isAllowedLogoUri(context, uri)) return null
         val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
         context.contentResolver.openInputStream(uri)?.use { stream ->
             BitmapFactory.decodeStream(stream, null, bounds)

@@ -135,7 +135,7 @@ private class ViewfinderSessionHolder {
     var boundCamera: androidx.camera.core.Camera? = null
     var boundPreview: Preview? = null
     var boundImageCapture: ImageCapture? = null
-    var boundVideoCapture: VideoCapture<Recorder>? = null
+    var boundVideoCapture: VideoCapture<*>? = null
     var boundImageAnalysis: ImageAnalysis? = null
     var boundConfig: CameraBindingRequest? = null
     var analysisExecutor: ExecutorService? = null
@@ -301,7 +301,7 @@ internal suspend fun awaitCameraStateClosed(
 @Composable
 fun CameraViewfinder(
     uiState: CameraUiState,
-    onCameraBound: (androidx.camera.core.Camera, ProcessCameraProvider, ImageCapture?, VideoCapture<Recorder>?) -> Unit,
+    onCameraBound: (androidx.camera.core.Camera, ProcessCameraProvider, ImageCapture?, VideoCapture<*>?) -> Unit,
     onStreamStateChanged: (Boolean) -> Unit,
     onPinchZoom: (Float) -> Unit,
     onTapToFocus: (MeteringPointFactory, Float, Float) -> Unit,
@@ -1103,6 +1103,11 @@ fun CameraViewfinder(
                     val previewBuilder = Preview.Builder()
                         .setResolutionSelector(defaultAspectResolutionSelector)
                         .setTargetRotation(displayRotation)
+                        .apply {
+                            if (targetBindingRequest.core.isVideoMode) {
+                                setDynamicRange(DynamicRange.SDR)
+                            }
+                        }
                     attachActiveLensCaptureCallback(
                         previewBuilder = previewBuilder,
                         mainExecutor = mainExecutor,
@@ -1446,7 +1451,7 @@ fun CameraViewfinder(
                     }
                     camera
                 } else {
-                    var videoCaptureInstance: VideoCapture<Recorder>? = null
+                    var videoCaptureInstance: VideoCapture<*>? = null
                     val camera = try {
                         val cameraInfo = cameraProvider.getCameraInfo(selector)
                         val encoderSupport = com.example.util.VideoEncoderUtil.detectVideoEncoderSupport()
@@ -1454,13 +1459,12 @@ fun CameraViewfinder(
                             probeCameraXVideoCapabilities(context, cameraInfo)
                         } else {
                             CameraXVideoProbeResult(
-                                capabilitiesSource = Recorder.VIDEO_CAPABILITIES_SOURCE_CODEC_CAPABILITIES,
-                                videoCapabilities = null,
+                                capabilitiesSource = Recorder.VIDEO_CAPABILITIES_SOURCE_CAMCORDER_PROFILE,
+                                isStabilizationSupported = false,
                                 supportedQualities = emptyList()
                             )
                         }
                         val effectiveCapSource = videoProbe.capabilitiesSource
-                        val videoCapabilities = videoProbe.videoCapabilities
                         val supportedQualities = videoProbe.supportedQualities
 
                         if (encoderSupport.canEncodeVideo && supportedQualities.isNotEmpty()) {
@@ -1499,7 +1503,7 @@ fun CameraViewfinder(
                             } else {
                                 baseBitrate
                             }
-                            val stabilizationSupported = (videoCapabilities?.isStabilizationSupported == true) ||
+                            val stabilizationSupported = videoProbe.isStabilizationSupported ||
                                 snapshotState.isVideoStabilizationSupported
 
                             val fallbackQuality = prioritizedQualities.last()
@@ -1521,7 +1525,8 @@ fun CameraViewfinder(
                                     .setAspectRatio(videoAspectRatio)
                                     .setTargetVideoEncodingBitRate(targetBitrate)
                                     .build()
-                                val videoCaptureBuilder = VideoCapture.Builder(recorder)
+                                val videoCaptureBuilder = VideoCapture.Builder(SdrScopedVideoOutput(recorder))
+                                    .setDynamicRange(DynamicRange.SDR)
                                     .setTargetRotation(displayRotation)
                                     .setVideoStabilizationEnabled(selectedEis && stabilizationSupported)
                                 if (selectedFps != VideoFpsOption.FPS_AUTO) {
@@ -1557,7 +1562,8 @@ fun CameraViewfinder(
                                         .setQualitySelector(QualitySelector.from(fallbackQuality))
                                         .setAspectRatio(videoAspectRatio)
                                         .build()
-                                    val fallbackCapture = VideoCapture.Builder(fallbackRecorder)
+                                    val fallbackCapture = VideoCapture.Builder(SdrScopedVideoOutput(fallbackRecorder))
+                                        .setDynamicRange(DynamicRange.SDR)
                                         .setTargetRotation(displayRotation)
                                         .build()
 
@@ -1742,13 +1748,13 @@ private fun attachActiveLensCaptureCallback(
         )
 }
 
-private data class CameraXVideoProbeResult(
+internal data class CameraXVideoProbeResult(
     val capabilitiesSource: Int,
-    val videoCapabilities: androidx.camera.video.VideoCapabilities?,
+    val isStabilizationSupported: Boolean,
     val supportedQualities: List<Quality>
 )
 
-private object CameraXVideoCapabilitiesCache {
+internal object CameraXVideoCapabilitiesCache {
     private val cache = java.util.concurrent.ConcurrentHashMap<String, CameraXVideoProbeResult>()
 
     fun get(cameraId: String): CameraXVideoProbeResult? = cache[cameraId]
@@ -1756,7 +1762,13 @@ private object CameraXVideoCapabilitiesCache {
     fun put(cameraId: String, result: CameraXVideoProbeResult) {
         cache[cameraId] = result
     }
+
+    fun clearForTesting() {
+        cache.clear()
+    }
 }
+
+private const val HDR_FORMAT_NONE = 0
 
 private val CAMERAX_SUPPORTED_VIDEO_MIMES = setOf(
     "video/avc",
@@ -1766,6 +1778,13 @@ private val CAMERAX_SUPPORTED_VIDEO_MIMES = setOf(
     "video/av01"
 )
 
+private val CAMERAX_SDR_QUALITY_TIERS = listOf(
+    android.media.CamcorderProfile.QUALITY_2160P to Quality.UHD,
+    android.media.CamcorderProfile.QUALITY_1080P to Quality.FHD,
+    android.media.CamcorderProfile.QUALITY_720P to Quality.HD,
+    android.media.CamcorderProfile.QUALITY_480P to Quality.SD
+)
+
 private fun getCameraVideoStreamSizes(context: Context, cameraIdStr: String): Set<android.util.Size> {
     return try {
         val cameraManager = context.getSystemService(Context.CAMERA_SERVICE) as? android.hardware.camera2.CameraManager
@@ -1773,6 +1792,7 @@ private fun getCameraVideoStreamSizes(context: Context, cameraIdStr: String): Se
         val chars = cameraManager.getCameraCharacteristics(cameraIdStr)
         val map = chars.get(android.hardware.camera2.CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP)
             ?: return emptySet()
+        // CameraX CamcorderProfileResolutionQuirk checks ImageFormat.PRIVATE stream sizes strictly.
         val privateSizes = map.getOutputSizes(android.graphics.ImageFormat.PRIVATE)?.toSet() ?: emptySet()
         if (privateSizes.isNotEmpty()) {
             privateSizes
@@ -1786,34 +1806,77 @@ private fun getCameraVideoStreamSizes(context: Context, cameraIdStr: String): Se
     }
 }
 
+@android.annotation.SuppressLint("RestrictedApi")
 @androidx.annotation.OptIn(androidx.camera.camera2.interop.ExperimentalCamera2Interop::class)
-private fun hasValidatedCamcorderEncoderProfiles(context: Context, cameraIdStr: String): Boolean {
-    // Only probe the exact Quality tiers used by CameraX CapabilitiesByQuality, and always guard with
-    // CamcorderProfile.hasProfile first so native MediaProfiles does not emit missing-quality log spam.
-    val qualityIds = intArrayOf(
-        android.media.CamcorderProfile.QUALITY_2160P,
-        android.media.CamcorderProfile.QUALITY_1080P,
-        android.media.CamcorderProfile.QUALITY_720P,
-        android.media.CamcorderProfile.QUALITY_480P
-    )
-    val camIdInt = cameraIdStr.toIntOrNull()
-    val supportedCameraSizes = getCameraVideoStreamSizes(context, cameraIdStr)
+internal fun resolveValidatedSdrVideoQualities(
+    context: Context,
+    cameraInfo: androidx.camera.core.CameraInfo,
+    cameraIdStr: String
+): List<Quality> {
+    val supportedCameraSizes = if (cameraIdStr.isNotEmpty()) {
+        getCameraVideoStreamSizes(context, cameraIdStr)
+    } else {
+        emptySet()
+    }
 
+    // Prefer CameraX's own quirk-filtered EncoderProfilesProvider (includes InvalidVideoProfilesQuirk,
+    // CamcorderProfileResolutionQuirk, ReportedVideoQualityNotSupportedQuirk, etc.) so we match
+    // CapabilitiesByQuality 1:1 without ever constructing CapabilitiesByQuality on an empty provider
+    // or probing unsupported HDR dynamic ranges.
+    val internalProvider = (cameraInfo as? androidx.camera.core.impl.CameraInfoInternal)?.encoderProfilesProvider
+    if (internalProvider != null) {
+        return CAMERAX_SDR_QUALITY_TIERS.mapNotNull { (camcorderQuality, cameraXQuality) ->
+            val hasProfile = try {
+                internalProvider.hasProfile(camcorderQuality)
+            } catch (_: Throwable) {
+                false
+            }
+            if (!hasProfile) return@mapNotNull null
+
+            val profiles = try {
+                internalProvider.getAll(camcorderQuality)
+            } catch (_: Throwable) {
+                null
+            } ?: return@mapNotNull null
+
+            val hasValidSdrProfile = profiles.videoProfiles.any { vp ->
+                val mime = vp.mediaType.lowercase(java.util.Locale.ROOT)
+                // CameraX DynamicRangeMatchedEncoderProfilesProvider requires exact BIT_DEPTH_8 + HDR_NONE for SDR.
+                val isSdrCompatible =
+                    vp.bitDepth == androidx.camera.core.impl.EncoderProfilesProxy.VideoProfileProxy.BIT_DEPTH_8 &&
+                        vp.hdrFormat == HDR_FORMAT_NONE
+                vp.width > 0 && vp.height > 0 && vp.frameRate > 0 && vp.bitrate > 0 &&
+                    mime in CAMERAX_SUPPORTED_VIDEO_MIMES &&
+                    isSdrCompatible &&
+                    (supportedCameraSizes.isEmpty() || supportedCameraSizes.contains(android.util.Size(vp.width, vp.height))) &&
+                    com.example.util.VideoEncoderUtil.isResolutionAndFpsSupported(
+                        width = vp.width,
+                        height = vp.height,
+                        fps = vp.frameRate.coerceAtLeast(30),
+                        preferredMime = mime,
+                        targetBitrate = vp.bitrate
+                    )
+            }
+            if (hasValidSdrProfile) cameraXQuality else null
+        }
+    }
+
+    val camIdInt = cameraIdStr.toIntOrNull()
     return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-        qualityIds.any { q ->
-            if (camIdInt != null && !android.media.CamcorderProfile.hasProfile(camIdInt, q)) {
-                return@any false
+        if (cameraIdStr.isEmpty()) return emptyList()
+        CAMERAX_SDR_QUALITY_TIERS.mapNotNull { (camcorderQuality, cameraXQuality) ->
+            if (camIdInt != null && !android.media.CamcorderProfile.hasProfile(camIdInt, camcorderQuality)) {
+                return@mapNotNull null
             }
             val profiles = try {
-                android.media.CamcorderProfile.getAll(cameraIdStr, q)
+                android.media.CamcorderProfile.getAll(cameraIdStr, camcorderQuality)
             } catch (_: Throwable) {
                 null
             }
-            profiles?.videoProfiles?.any { vp ->
+            val hasValidSdrProfile = profiles?.videoProfiles?.any { vp ->
                 val mime = vp.mediaType.lowercase(java.util.Locale.ROOT)
                 val isSdrCompatible = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                    (vp.bitDepth == 0 || vp.bitDepth == 8) &&
-                        vp.hdrFormat == android.media.EncoderProfiles.VideoProfile.HDR_NONE
+                    vp.bitDepth == 8 && vp.hdrFormat == HDR_FORMAT_NONE
                 } else {
                     true
                 }
@@ -1829,14 +1892,15 @@ private fun hasValidatedCamcorderEncoderProfiles(context: Context, cameraIdStr: 
                         targetBitrate = vp.bitrate
                     )
             } == true
+            if (hasValidSdrProfile) cameraXQuality else null
         }
     } else {
-        val camId = camIdInt ?: return false
-        qualityIds.any { q ->
-            if (!android.media.CamcorderProfile.hasProfile(camId, q)) return@any false
+        val camId = camIdInt ?: return emptyList()
+        CAMERAX_SDR_QUALITY_TIERS.mapNotNull { (camcorderQuality, cameraXQuality) ->
+            if (!android.media.CamcorderProfile.hasProfile(camId, camcorderQuality)) return@mapNotNull null
             val profile = try {
                 @Suppress("DEPRECATION")
-                android.media.CamcorderProfile.get(camId, q)
+                android.media.CamcorderProfile.get(camId, camcorderQuality)
             } catch (_: Throwable) {
                 null
             }
@@ -1846,7 +1910,7 @@ private fun hasValidatedCamcorderEncoderProfiles(context: Context, cameraIdStr: 
                 android.media.MediaRecorder.VideoEncoder.VP8 -> "video/x-vnd.on2.vp8"
                 else -> null
             }
-            profile != null && mime != null &&
+            val isValid = profile != null && mime != null &&
                 profile.videoFrameWidth > 0 && profile.videoFrameHeight > 0 &&
                 (supportedCameraSizes.isEmpty() || supportedCameraSizes.contains(android.util.Size(profile.videoFrameWidth, profile.videoFrameHeight))) &&
                 com.example.util.VideoEncoderUtil.isResolutionAndFpsSupported(
@@ -1856,17 +1920,74 @@ private fun hasValidatedCamcorderEncoderProfiles(context: Context, cameraIdStr: 
                     preferredMime = mime,
                     targetBitrate = profile.videoBitRate
                 )
+            if (isValid) cameraXQuality else null
         }
     }
 }
 
+@android.annotation.SuppressLint("RestrictedApi")
 @androidx.annotation.OptIn(androidx.camera.camera2.interop.ExperimentalCamera2Interop::class)
-private fun probeCameraXVideoCapabilities(
+internal fun hasValidatedCamcorderEncoderProfiles(
+    context: Context,
+    cameraInfo: androidx.camera.core.CameraInfo,
+    cameraIdStr: String
+): Boolean = resolveValidatedSdrVideoQualities(context, cameraInfo, cameraIdStr).isNotEmpty()
+
+@android.annotation.SuppressLint("RestrictedApi")
+internal fun createSdrScopedCameraInfo(
+    cameraInfo: androidx.camera.core.CameraInfo
+): androidx.camera.core.impl.CameraInfoInternal? {
+    val internal = cameraInfo as? androidx.camera.core.impl.CameraInfoInternal ?: return null
+    val sdrSet = java.util.Collections.singleton(DynamicRange.SDR)
+    val iface = androidx.camera.core.impl.CameraInfoInternal::class.java
+    return java.lang.reflect.Proxy.newProxyInstance(
+        iface.classLoader,
+        arrayOf(iface)
+    ) { proxy, method, args ->
+        when (method.name) {
+            "getSupportedDynamicRanges" -> sdrSet
+            "querySupportedDynamicRanges" -> {
+                val requested = args?.firstOrNull() as? Set<*>
+                if (requested.isNullOrEmpty() || requested.contains(DynamicRange.SDR) || requested.contains(DynamicRange.UNSPECIFIED)) {
+                    sdrSet
+                } else {
+                    emptySet<DynamicRange>()
+                }
+            }
+            "equals" -> proxy === args?.firstOrNull() || internal == args?.firstOrNull()
+            "hashCode" -> internal.hashCode()
+            "toString" -> internal.toString()
+            else -> try {
+                if (args.isNullOrEmpty()) method.invoke(internal) else method.invoke(internal, *args)
+            } catch (ite: java.lang.reflect.InvocationTargetException) {
+                throw ite.targetException
+            }
+        }
+    } as androidx.camera.core.impl.CameraInfoInternal
+}
+
+@android.annotation.SuppressLint("RestrictedApi")
+internal class SdrScopedVideoOutput(
+    val recorder: Recorder
+) : androidx.camera.video.VideoOutput by recorder {
+    override fun getMediaCapabilities(
+        cameraInfo: androidx.camera.core.CameraInfo,
+        sessionType: Int
+    ): androidx.camera.video.VideoCapabilities {
+        val scopedInfo = createSdrScopedCameraInfo(cameraInfo) ?: cameraInfo
+        return recorder.getMediaCapabilities(scopedInfo, sessionType)
+    }
+}
+
+@android.annotation.SuppressLint("RestrictedApi")
+@androidx.annotation.OptIn(androidx.camera.camera2.interop.ExperimentalCamera2Interop::class)
+internal fun probeCameraXVideoCapabilities(
     context: Context,
     cameraInfo: androidx.camera.core.CameraInfo
 ): CameraXVideoProbeResult {
     val cameraIdStr = try {
-        androidx.camera.camera2.interop.Camera2CameraInfo.from(cameraInfo).cameraId
+        (cameraInfo as? androidx.camera.core.impl.CameraInfoInternal)?.cameraId
+            ?: androidx.camera.camera2.interop.Camera2CameraInfo.from(cameraInfo).cameraId
     } catch (_: Throwable) {
         ""
     }
@@ -1874,33 +1995,66 @@ private fun probeCameraXVideoCapabilities(
         CameraXVideoCapabilitiesCache.get(cameraIdStr)?.let { return it }
     }
 
-    val canTryCamcorderProfile = cameraIdStr.isNotEmpty() && hasValidatedCamcorderEncoderProfiles(context, cameraIdStr)
-    if (canTryCamcorderProfile) {
+    val supportsSdr = try {
+        cameraInfo.querySupportedDynamicRanges(setOf(DynamicRange.SDR)).contains(DynamicRange.SDR)
+    } catch (_: Throwable) {
+        true
+    }
+    val preValidatedQualities = if (supportsSdr) {
+        resolveValidatedSdrVideoQualities(context, cameraInfo, cameraIdStr)
+    } else {
+        emptyList()
+    }
+
+    if (preValidatedQualities.isNotEmpty()) {
         val capSource = Recorder.VIDEO_CAPABILITIES_SOURCE_CAMCORDER_PROFILE
-        val caps = try {
-            Recorder.getVideoCapabilities(cameraInfo, capSource)
-        } catch (_: Throwable) {
+        // Query RecorderVideoCapabilities with SDR-scoped CameraInfo so CameraX resolves exact SDR
+        // qualities & stabilization without invoking CapabilitiesByQuality on HDR dynamic ranges.
+        val scopedInfo = createSdrScopedCameraInfo(cameraInfo)
+        val caps = if (scopedInfo != null) {
+            try {
+                Recorder.getVideoCapabilities(scopedInfo, capSource)
+            } catch (_: Throwable) {
+                null
+            }
+        } else {
             null
         }
-        val qualities = try {
-            caps?.getSupportedQualities(DynamicRange.SDR) ?: emptyList()
+        val recorderQualities = try {
+            caps?.getSupportedQualities(DynamicRange.SDR)?.takeIf { it.isNotEmpty() }
         } catch (_: Throwable) {
-            emptyList()
+            null
+        } ?: preValidatedQualities
+
+        val isStabilizationSupported = try {
+            caps?.isStabilizationSupported ?: false
+        } catch (_: Throwable) {
+            false
+        } || try {
+            val c2Info = androidx.camera.camera2.interop.Camera2CameraInfo.from(cameraInfo)
+            val modes = c2Info.getCameraCharacteristic(
+                android.hardware.camera2.CameraCharacteristics.CONTROL_AVAILABLE_VIDEO_STABILIZATION_MODES
+            )
+            modes?.contains(android.hardware.camera2.CameraCharacteristics.CONTROL_VIDEO_STABILIZATION_MODE_ON) == true
+        } catch (_: Throwable) {
+            false
         }
-        if (qualities.isNotEmpty()) {
-            return CameraXVideoProbeResult(capSource, caps, qualities).also {
-                if (cameraIdStr.isNotEmpty()) CameraXVideoCapabilitiesCache.put(cameraIdStr, it)
-            }
+
+        return CameraXVideoProbeResult(
+            capabilitiesSource = capSource,
+            isStabilizationSupported = isStabilizationSupported,
+            supportedQualities = recorderQualities
+        ).also {
+            if (cameraIdStr.isNotEmpty()) CameraXVideoCapabilitiesCache.put(cameraIdStr, it)
         }
     }
 
-    // Do not invoke Recorder.getVideoCapabilities with VIDEO_CAPABILITIES_SOURCE_CODEC_CAPABILITIES
-    // on sensors lacking valid CamcorderProfiles: CameraX 1.5.0 still constructs CapabilitiesByQuality
-    // over the empty EncoderProfilesProvider (emitting E/CapabilitiesByQuality errors) and emulator
-    // MediaMuxer/MPEG4Writer fails to encode frames cleanly without hardware-backed profiles.
+    // Do not invoke Recorder.getVideoCapabilities when Camcorder/EncoderProfiles are absent:
+    // CameraX 1.5.0 constructs CapabilitiesByQuality over the empty provider and emits
+    // E/CapabilitiesByQuality: No supported EncoderProfiles.
     return CameraXVideoProbeResult(
         capabilitiesSource = Recorder.VIDEO_CAPABILITIES_SOURCE_CAMCORDER_PROFILE,
-        videoCapabilities = null,
+        isStabilizationSupported = false,
         supportedQualities = emptyList()
     ).also {
         if (cameraIdStr.isNotEmpty()) CameraXVideoCapabilitiesCache.put(cameraIdStr, it)

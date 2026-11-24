@@ -447,7 +447,7 @@ fun CameraScreen(
         } else {
             // Stable interaction callbacks to prevent unnecessary child recompositions
             val onCameraBound = remember(viewModel) {
-                { cam: androidx.camera.core.Camera, prov: androidx.camera.lifecycle.ProcessCameraProvider, img: androidx.camera.core.ImageCapture?, vid: androidx.camera.video.VideoCapture<androidx.camera.video.Recorder>? ->
+                { cam: androidx.camera.core.Camera, prov: androidx.camera.lifecycle.ProcessCameraProvider, img: androidx.camera.core.ImageCapture?, vid: androidx.camera.video.VideoCapture<*>? ->
                     viewModel.onCameraBound(cam, prov, img, vid)
                 }
             }
@@ -834,6 +834,7 @@ fun CameraScreen(
                         viewModel.openWatermarkStudioFromEditor(snapshot)
                     },
                     isImportedPhoto = uiState.isEditingPhotoImported,
+                    isSaveLocationEnabled = uiState.isSaveLocationEnabled,
                     pendingWatermarkResult = uiState.pendingEditorWatermarkResult,
                     onConsumeWatermarkResult = { eventId ->
                         viewModel.consumePendingEditorWatermarkResult(eventId)

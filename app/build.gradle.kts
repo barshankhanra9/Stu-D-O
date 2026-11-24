@@ -1,3 +1,4 @@
+import com.android.build.api.variant.FilterConfiguration.FilterType.ABI
 import com.google.gms.googleservices.GoogleServicesPlugin.MissingGoogleServicesStrategy
 
 plugins {
@@ -73,16 +74,43 @@ android {
     includeInBundle = true
   }
 
-  // Optional ABI split configuration for lean GitHub APK releases (pass -PenableAbiSplits=true)
+  // ABI split configuration for lean GitHub APK releases:
+  // Enabled automatically for release APK builds (or when -PenableAbiSplits=true is passed),
+  // while preserving single-APK debug output unless explicitly requested.
+  val isReleaseApkTask = gradle.startParameter.taskNames.any { taskName ->
+    (taskName.contains("release", ignoreCase = true) && !taskName.contains("bundle", ignoreCase = true)) ||
+      taskName.equals("assemble", ignoreCase = true) ||
+      taskName.endsWith(":assemble", ignoreCase = true)
+  }
   val enableAbiSplits = providers.gradleProperty("enableAbiSplits")
     .map { it.equals("true", ignoreCase = true) }
-    .getOrElse(false)
+    .getOrElse(isReleaseApkTask)
   splits {
     abi {
       isEnable = enableAbiSplits
       reset()
       include("arm64-v8a", "armeabi-v7a")
       isUniversalApk = true
+    }
+  }
+}
+
+// Unique versionCode mapping per ABI variant (universal keeps lowest base versionCode as fallback;
+// arm64-v8a > armeabi-v7a > universal for Play Store & upgrade compatibility).
+val abiCodes = mapOf(
+  "armeabi-v7a" to 1,
+  "arm64-v8a" to 2
+)
+
+androidComponents {
+  onVariants { variant ->
+    variant.outputs.forEach { output ->
+      val abiName = output.filters.find { it.filterType == ABI }?.identifier
+      val baseAbiCode = abiCodes[abiName]
+      if (baseAbiCode != null) {
+        val baseVersionCode = output.versionCode.orNull ?: 0
+        output.versionCode.set(baseAbiCode * 1000 + baseVersionCode)
+      }
     }
   }
 }
