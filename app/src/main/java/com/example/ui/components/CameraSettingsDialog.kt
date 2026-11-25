@@ -446,7 +446,7 @@ fun CameraSettingsDialog(
                     )
                 }
 
-                if (settingsState.isRawSupportedOnCurrentLens) {
+                if (settingsState.isRawSupportedOnCurrentLens && settingsState.cameraMode != com.example.model.CameraMode.PORTRAIT) {
                     item(key = "card_raw_capture", contentType = "chip_row_card") {
                         RawCaptureCard(
                             rawCaptureMode = settingsState.rawCaptureMode,

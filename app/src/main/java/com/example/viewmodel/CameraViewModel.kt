@@ -1339,7 +1339,8 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
             delay(120)
             val allMedia = mediaCaptureManager.getAllMedia()
             val resInfo = "${actualSize.width} × ${actualSize.height} (${String.format(java.util.Locale.US, "%.1f", actualMp)} MP)"
-            val isDngOnly = _uiState.value.rawCaptureMode == RawCaptureMode.DNG_ONLY
+            val isDngOnly = _uiState.value.rawCaptureMode == RawCaptureMode.DNG_ONLY &&
+                _uiState.value.cameraMode != CameraMode.PORTRAIT
             val msg = when {
                 isDngOnly -> "Captured RAW DNG ($resInfo)"
                 rawUri != null -> "Captured $resInfo + RAW DNG"
@@ -2798,6 +2799,9 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     fun cycleRawModeFromTopBar() {
+        if (_uiState.value.cameraMode == CameraMode.PORTRAIT) {
+            return
+        }
         if (!_uiState.value.isRawSupportedOnCurrentLens) {
             _uiState.update { it.copy(userMessage = "RAW capture is not supported by this camera sensor") }
             return

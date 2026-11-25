@@ -309,4 +309,75 @@ class EncoderProfilesFixTest {
             .build()
         assertEquals(DynamicRange.SDR, videoCapture.dynamicRange)
     }
+
+    @Test
+    fun `VideoEncoderUtil detects encoder with low max fps and unaligned lower bounds`() {
+        ShadowMediaCodecList.reset()
+        VideoEncoderUtil.clearCacheForTesting()
+        val fmt = MediaFormat.createVideoFormat("video/avc", 640, 480).apply {
+            setInteger(MediaFormat.KEY_BIT_RATE, 2_000_000)
+            setInteger(MediaFormat.KEY_FRAME_RATE, 15)
+            setInteger(
+                MediaFormat.KEY_COLOR_FORMAT,
+                MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface
+            )
+            setString("bitrate-mode", "VBR")
+            setString("size-range", "176x144-1280x720")
+            setString("frame-rate-range", "1-15")
+            setString("bitrate-range", "100000-10000000")
+        }
+        val profileLevel = MediaCodecInfo.CodecProfileLevel().apply {
+            profile = MediaCodecInfo.CodecProfileLevel.AVCProfileBaseline
+            level = MediaCodecInfo.CodecProfileLevel.AVCLevel3
+        }
+        val avcCaps = MediaCodecInfoBuilder.CodecCapabilitiesBuilder.newBuilder()
+            .setMediaFormat(fmt)
+            .setIsEncoder(true)
+            .setColorFormats(intArrayOf(MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface))
+            .setProfileLevels(arrayOf(profileLevel))
+            .build()
+        val avcCodec = MediaCodecInfoBuilder.newBuilder()
+            .setName("c2.android.avc.lowfps.encoder")
+            .setIsEncoder(true)
+            .setCapabilities(avcCaps)
+            .build()
+        ShadowMediaCodecList.addCodec(avcCodec)
+
+        val support = VideoEncoderUtil.detectVideoEncoderSupport()
+        assertTrue("Expected low-fps encoder to be detected cleanly", support.canEncodeVideo)
+        assertTrue(VideoEncoderUtil.isResolutionAndFpsSupported(640, 480, 15))
+    }
+
+    @Test
+    fun `empty probe result is never cached permanently and createSdrScopedCameraInfo intercepts getImplementation`() {
+        val emptyCamera = createFakeCameraInfoInternal(
+            cameraId = "test_no_cache_empty",
+            provider = EncoderProfilesProvider.EMPTY,
+            supportedResolutions = emptyList()
+        )
+        val firstProbe = probeCameraXVideoCapabilities(context, emptyCamera)
+        assertTrue(firstProbe.supportedQualities.isEmpty())
+        assertEquals(null, CameraXVideoCapabilitiesCache.get("test_no_cache_empty"))
+
+        // Subsequent probe with stream resolutions for the same cameraId succeeds instead of reading stale empty cache
+        val recoveredCamera = createFakeCameraInfoInternal(
+            cameraId = "test_no_cache_empty",
+            provider = EncoderProfilesProvider.EMPTY,
+            supportedResolutions = listOf(Size(1280, 720), Size(640, 480))
+        )
+        val secondProbe = probeCameraXVideoCapabilities(context, recoveredCamera)
+        assertEquals(Recorder.VIDEO_CAPABILITIES_SOURCE_CODEC_CAPABILITIES, secondProbe.capabilitiesSource)
+        assertTrue(secondProbe.supportedQualities.contains(Quality.HD))
+
+        // SDR-scoped proxy must intercept getImplementation() so CameraX does not unwrap back to HDR capabilities
+        val hdrCamera = createFakeCameraInfoInternal(
+            cameraId = "test_sdr_proxy_impl",
+            provider = EncoderProfilesProvider.EMPTY,
+            supportedDynamicRanges = setOf(DynamicRange.SDR, DynamicRange.HLG_10_BIT)
+        )
+        val scoped = com.example.ui.components.createSdrScopedCameraInfo(hdrCamera)!!
+        assertEquals(setOf(DynamicRange.SDR), scoped.supportedDynamicRanges)
+        assertEquals(setOf(DynamicRange.SDR), scoped.implementation.supportedDynamicRanges)
+    }
 }
+

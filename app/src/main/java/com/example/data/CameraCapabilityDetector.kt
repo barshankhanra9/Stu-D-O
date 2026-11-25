@@ -547,11 +547,14 @@ class CameraCapabilityDetector(private val context: Context) {
         val detectedVideoQualities = mutableListOf<VideoQualityOption>()
         val fpsMap = mutableMapOf<VideoQualityOption, List<VideoFpsOption>>()
 
-        // Check MediaRecorder, SurfaceTexture, and PRIVATE output sizes to avoid legacy CamcorderProfile false negatives
+        // Combine MediaRecorder, SurfaceTexture, and PRIVATE output sizes to avoid partial subset false negatives
         val mrSizes = standardMap?.getOutputSizes(android.media.MediaRecorder::class.java)?.takeIf { it.isNotEmpty() }
         val stSizes = standardMap?.getOutputSizes(android.graphics.SurfaceTexture::class.java)?.takeIf { it.isNotEmpty() }
         val privSizes = standardMap?.getOutputSizes(ImageFormat.PRIVATE)?.takeIf { it.isNotEmpty() }
-        val recorderSizes = mrSizes ?: stSizes ?: privSizes
+        val combinedRecorderSizes = ((mrSizes?.toList() ?: emptyList()) +
+            (stSizes?.toList() ?: emptyList()) +
+            (privSizes?.toList() ?: emptyList())).distinct().toTypedArray()
+        val recorderSizes = combinedRecorderSizes.takeIf { it.isNotEmpty() }
         val highSpeedVideoSizes = try {
             standardMap?.highSpeedVideoSizes ?: emptyArray()
         } catch (_: Throwable) {
@@ -597,7 +600,9 @@ class CameraCapabilityDetector(private val context: Context) {
             // 4. Video encoder resolution, rate, bitrate, and configuration verification
             return if (fps == 0) {
                 com.example.util.VideoEncoderUtil.isResolutionAndFpsSupported(width, height, 30) ||
-                    com.example.util.VideoEncoderUtil.isResolutionAndFpsSupported(width, height, 24)
+                    com.example.util.VideoEncoderUtil.isResolutionAndFpsSupported(width, height, 24) ||
+                    com.example.util.VideoEncoderUtil.isResolutionAndFpsSupported(width, height, 15) ||
+                    com.example.util.VideoEncoderUtil.isResolutionAndFpsSupported(width, height, 0)
             } else {
                 com.example.util.VideoEncoderUtil.isResolutionAndFpsSupported(width, height, fps)
             }
@@ -612,9 +617,7 @@ class CameraCapabilityDetector(private val context: Context) {
 
         for ((opt, w, h) in qualitySpecs) {
             val is30Ok = isCameraAndEncoderFpsSupported(w, h, 30)
-            val isAutoFallbackOk = !is30Ok &&
-                fpsRanges.none { it.upper >= 30 } &&
-                isCameraAndEncoderFpsSupported(w, h, 0)
+            val isAutoFallbackOk = !is30Ok && isCameraAndEncoderFpsSupported(w, h, 0)
             if (is30Ok || isAutoFallbackOk) {
                 detectedVideoQualities.add(opt)
                 val fpsList = mutableListOf(VideoFpsOption.FPS_AUTO)
@@ -682,7 +685,8 @@ class CameraCapabilityDetector(private val context: Context) {
             } || videoSizePool.any { s ->
                 s.width >= 640 && s.height >= 360 &&
                     kotlin.math.abs((s.width.toDouble() / s.height) - (16.0 / 9.0)) < 0.08 &&
-                    com.example.util.VideoEncoderUtil.isResolutionAndFpsSupported(s.width, s.height, 30)
+                    (com.example.util.VideoEncoderUtil.isResolutionAndFpsSupported(s.width, s.height, 30) ||
+                        com.example.util.VideoEncoderUtil.isResolutionAndFpsSupported(s.width, s.height, 0))
             }
             if (supports16_9Video) {
                 supportedVideoRatios.add(com.example.model.CaptureAspectRatio.RATIO_16_9)
@@ -691,7 +695,8 @@ class CameraCapabilityDetector(private val context: Context) {
             val supports4_3Video = videoSizePool.any { s ->
                 s.width >= 640 && s.height >= 480 &&
                     kotlin.math.abs((s.width.toDouble() / s.height) - (4.0 / 3.0)) < 0.08 &&
-                    com.example.util.VideoEncoderUtil.isResolutionAndFpsSupported(s.width, s.height, 30)
+                    (com.example.util.VideoEncoderUtil.isResolutionAndFpsSupported(s.width, s.height, 30) ||
+                        com.example.util.VideoEncoderUtil.isResolutionAndFpsSupported(s.width, s.height, 0))
             }
             if (supports4_3Video) {
                 supportedVideoRatios.add(com.example.model.CaptureAspectRatio.RATIO_4_3)

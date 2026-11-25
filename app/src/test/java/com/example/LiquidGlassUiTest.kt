@@ -776,4 +776,63 @@ class LiquidGlassUiTest {
         composeTestRule.waitForIdle()
         composeTestRule.onNodeWithTag("curved_zoom_arc").assertIsDisplayed()
     }
+
+    @Test
+    fun `portrait mode hides UHR, HDR, RAW top-bar badges and hides RAW capture card in settings`() {
+        val portraitState = CameraUiState(
+            cameraMode = CameraMode.PORTRAIT,
+            photoResolution = com.example.model.PhotoResolution.ULTRA_RES,
+            uhrMegapixels = 50.0,
+            isHdrEnabled = true,
+            isRawSupportedOnCurrentLens = true,
+            rawCaptureMode = RawCaptureMode.JPEG_AND_DNG,
+            isSettingsOpen = true
+        )
+
+        composeTestRule.setContent {
+            Column(modifier = Modifier.fillMaxSize()) {
+                CameraTopBar(
+                    uiState = portraitState,
+                    onCycleFlash = {},
+                    onOpenSettings = {},
+                    onCycleAspectRatio = {},
+                    onToggleQuickSettings = {},
+                    onToggleFilterSelector = {}
+                )
+                com.example.ui.components.CameraSettingsDialog(
+                    uiState = portraitState,
+                    onDismiss = {},
+                    onToggleHistogram = {},
+                    onToggleLevel = {},
+                    onSelectGrid = {},
+                    onToggleShutterSound = {},
+                    onSelectTimer = {},
+                    onSelectAspectRatio = {},
+                    onSelectPhotoResolution = {},
+                    onSelectRawCaptureMode = {},
+                    onToggleHdr = {},
+                    onToggleWatermark = {},
+                    onSelectVideoQuality = {},
+                    onSelectVideoCodec = {},
+                    onToggleSelfieMirror = {},
+                    onToggleSaveLocation = {},
+                    onToggleHapticFeedback = {},
+                    onToggleKeepScreenAwake = {},
+                    onSelectVolumeKeyAction = {},
+                    onVersionTapped = {}
+                )
+            }
+        }
+
+        composeTestRule.waitForIdle()
+        composeTestRule.onNodeWithTag("app_brand_text").assertIsDisplayed()
+        composeTestRule.onNodeWithTag("top_portrait_aperture_badge").assertIsDisplayed()
+        composeTestRule.onNodeWithTag("raw_format_toggle_button").assertDoesNotExist()
+        composeTestRule.onNodeWithText("RAW+").assertDoesNotExist()
+        composeTestRule.onNodeWithText("RAW").assertDoesNotExist()
+        composeTestRule.onNodeWithText("HDR").assertDoesNotExist()
+        composeTestRule.onNodeWithText("UHR 50MP").assertDoesNotExist()
+        composeTestRule.onNodeWithText("RAW_SENSOR Capture (DNG)").assertDoesNotExist()
+    }
 }
+

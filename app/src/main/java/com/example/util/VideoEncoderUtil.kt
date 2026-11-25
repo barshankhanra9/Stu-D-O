@@ -79,24 +79,39 @@ object VideoEncoderUtil {
                         val videoCaps = caps.videoCapabilities ?: continue
                         val widths = videoCaps.supportedWidths
                         val heights = videoCaps.supportedHeights
-                        val candidates = listOf(
-                            Triple(1280, 720, 30),
-                            Triple(640, 480, 30),
-                            Triple(1280, 720, 24),
-                            Triple(640, 480, 24),
-                            Triple(widths.lower, heights.lower, 30),
-                            Triple(widths.lower, heights.lower, 24)
+                        val wAlign = videoCaps.widthAlignment.coerceAtLeast(1)
+                        val hAlign = videoCaps.heightAlignment.coerceAtLeast(1)
+                        val alignedLowerW = (((widths.lower + wAlign - 1) / wAlign) * wAlign)
+                            .coerceIn(widths.lower, widths.upper)
+                        val alignedLowerH = (((heights.lower + hAlign - 1) / hAlign) * hAlign)
+                            .coerceIn(heights.lower, heights.upper)
+                        val maxSupportedFps = try {
+                            videoCaps.supportedFrameRates?.upper?.toInt()?.coerceIn(1, 30) ?: 30
+                        } catch (_: Throwable) {
+                            30
+                        }
+                        val candidateSizes = listOf(
+                            1280 to 720,
+                            720 to 480,
+                            640 to 480,
+                            320 to 240,
+                            alignedLowerW to alignedLowerH,
+                            widths.lower to heights.lower
                         ).distinct()
+                        val candidateFpsList = listOf(30, 24, 15, maxSupportedFps, 0).distinct()
 
-                        for ((testW, testH, testFps) in candidates) {
+                        for ((testW, testH) in candidateSizes) {
                             if (!widths.contains(testW) || !heights.contains(testH)) continue
                             if (!videoCaps.isSizeSupported(testW, testH)) continue
-                            val nominal = calculateNominalBitrate(testW, testH, testFps)
-                            val testBitrate = videoCaps.bitrateRange?.clamp(nominal) ?: nominal
-                            if (verifyEncoderConfiguration(codecInfo.name, mime, testW, testH, testFps, testBitrate)) {
-                                hasValidConfiguration = true
-                                break
+                            for (testFps in candidateFpsList) {
+                                val nominal = calculateNominalBitrate(testW, testH, if (testFps > 0) testFps else 30)
+                                val testBitrate = videoCaps.bitrateRange?.clamp(nominal) ?: nominal
+                                if (verifyEncoderConfiguration(codecInfo.name, mime, testW, testH, testFps, testBitrate)) {
+                                    hasValidConfiguration = true
+                                    break
+                                }
                             }
+                            if (hasValidConfiguration) break
                         }
                         if (hasValidConfiguration) break
                     } catch (_: Throwable) {}

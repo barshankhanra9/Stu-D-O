@@ -1055,6 +1055,7 @@ data class DeviceOrientationState(
 
 @Immutable
 data class SettingsUiState(
+    val cameraMode: CameraMode = CameraMode.PHOTO,
     val availableResolutionOptions: List<DynamicResolutionOption>,
     val photoResolution: PhotoResolution,
     val isUhrSupportedOnCurrentLens: Boolean,
@@ -1098,6 +1099,7 @@ data class SettingsUiState(
 )
 
 fun CameraUiState.toSettingsUiState(): SettingsUiState = SettingsUiState(
+    cameraMode = cameraMode,
     availableResolutionOptions = availableResolutionOptions,
     photoResolution = photoResolution,
     isUhrSupportedOnCurrentLens = isUhrSupportedOnCurrentLens,

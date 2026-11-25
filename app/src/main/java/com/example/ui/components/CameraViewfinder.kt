@@ -1454,12 +1454,35 @@ fun CameraViewfinder(
                     var videoCaptureInstance: VideoCapture<*>? = null
                     val camera = try {
                         val cameraInfo = cameraProvider.getCameraInfo(selector)
-                        val encoderSupport = com.example.util.VideoEncoderUtil.detectVideoEncoderSupport()
+                        val encoderSupport = try {
+                            com.example.util.VideoEncoderUtil.detectVideoEncoderSupport()
+                        } catch (_: Throwable) {
+                            com.example.util.VideoEncoderSupport(
+                                hasHardwareEncoder = false,
+                                hasSoftwareEncoder = false,
+                                supportedMimeTypes = emptyList(),
+                                hardwareCodecs = emptyList(),
+                                softwareCodecs = emptyList()
+                            )
+                        }
                         val videoProbe = if (encoderSupport.canEncodeVideo) {
-                            probeCameraXVideoCapabilities(context, cameraInfo)
+                            try {
+                                probeCameraXVideoCapabilities(context, cameraInfo)
+                            } catch (probeErr: Throwable) {
+                                android.util.Log.w(
+                                    "CameraViewfinder",
+                                    "probeCameraXVideoCapabilities failed: ${probeErr.message}",
+                                    probeErr
+                                )
+                                CameraXVideoProbeResult(
+                                    capabilitiesSource = Recorder.VIDEO_CAPABILITIES_SOURCE_CODEC_CAPABILITIES,
+                                    isStabilizationSupported = false,
+                                    supportedQualities = emptyList()
+                                )
+                            }
                         } else {
                             CameraXVideoProbeResult(
-                                capabilitiesSource = Recorder.VIDEO_CAPABILITIES_SOURCE_CAMCORDER_PROFILE,
+                                capabilitiesSource = Recorder.VIDEO_CAPABILITIES_SOURCE_CODEC_CAPABILITIES,
                                 isStabilizationSupported = false,
                                 supportedQualities = emptyList()
                             )
@@ -1467,58 +1490,88 @@ fun CameraViewfinder(
                         val effectiveCapSource = videoProbe.capabilitiesSource
                         val supportedQualities = videoProbe.supportedQualities
 
-                        if (encoderSupport.canEncodeVideo && supportedQualities.isNotEmpty()) {
-                            val preferredQuality = when (targetBindingRequest.core.videoQuality ?: snapshotState.videoQuality) {
-                                VideoQualityOption.QUALITY_2160P -> Quality.UHD
-                                VideoQualityOption.QUALITY_1080P -> Quality.FHD
-                                VideoQualityOption.QUALITY_720P -> Quality.HD
-                                VideoQualityOption.QUALITY_480P -> Quality.SD
+                        fun tryBindVideoCandidate(
+                            stageName: String,
+                            createUseCases: () -> Pair<Preview, VideoCapture<*>>
+                        ): androidx.camera.core.Camera? {
+                            return try {
+                                try {
+                                    cameraProvider.unbindAll()
+                                } catch (_: Throwable) {}
+                                val (previewUc, videoUc) = createUseCases()
+                                val boundCam = cameraProvider.bindToLifecycle(
+                                    lifecycleOwner,
+                                    selector,
+                                    previewUc,
+                                    videoUc
+                                )
+                                attachBoundPreview(previewUc)
+                                videoCaptureInstance = videoUc
+                                boundCam
+                            } catch (t: Throwable) {
+                                android.util.Log.w(
+                                    "CameraViewfinder",
+                                    "VideoCapture $stageName bind failed: ${t.message}",
+                                    t
+                                )
+                                try {
+                                    cameraProvider.unbindAll()
+                                } catch (_: Throwable) {}
+                                null
                             }
+                        }
 
-                            val prioritizedQualities = (listOf(preferredQuality) + supportedQualities).distinct().filter {
-                                supportedQualities.contains(it)
-                            }.ifEmpty { supportedQualities }
+                        // Stage 1: Primary probed Recorder + SdrScopedVideoOutput with user-configured quality/bitrate/EIS/FPS.
+                        val stage1Camera = if (encoderSupport.canEncodeVideo && supportedQualities.isNotEmpty()) {
+                            tryBindVideoCandidate("stage1_primary") {
+                                val preferredQuality = when (targetBindingRequest.core.videoQuality ?: snapshotState.videoQuality) {
+                                    VideoQualityOption.QUALITY_2160P -> Quality.UHD
+                                    VideoQualityOption.QUALITY_1080P -> Quality.FHD
+                                    VideoQualityOption.QUALITY_720P -> Quality.HD
+                                    VideoQualityOption.QUALITY_480P -> Quality.SD
+                                }
+                                val prioritizedQualities = (listOf(preferredQuality) + supportedQualities).distinct().filter {
+                                    supportedQualities.contains(it)
+                                }.ifEmpty { supportedQualities }
 
-                            val activeQuality = prioritizedQualities.first()
-                            val (qW, qH) = when (activeQuality) {
-                                Quality.UHD -> 3840 to 2160
-                                Quality.FHD -> 1920 to 1080
-                                Quality.HD -> 1280 to 720
-                                else -> 720 to 480
-                            }
-                            val selectedFps = targetBindingRequest.core.videoFps ?: snapshotState.videoFps
-                            val selectedCodec = targetBindingRequest.core.videoCodec ?: snapshotState.videoCodec
-                            val selectedEis = targetBindingRequest.core.isVideoStabilizationEnabled
-                                ?: snapshotState.isVideoStabilizationEnabled
-                            val nominalFps = when (selectedFps) {
-                                VideoFpsOption.FPS_120 -> 120
-                                VideoFpsOption.FPS_60 -> 60
-                                VideoFpsOption.FPS_30 -> 30
-                                VideoFpsOption.FPS_24 -> 24
-                                VideoFpsOption.FPS_AUTO -> 30
-                            }
-                            val baseBitrate = com.example.util.VideoEncoderUtil.calculateNominalBitrate(qW, qH, nominalFps)
-                            val targetBitrate = if (selectedCodec == VideoCodecOption.HEVC) {
-                                (baseBitrate * 0.72).toInt().coerceAtLeast(1_500_000)
-                            } else {
-                                baseBitrate
-                            }
-                            val stabilizationSupported = videoProbe.isStabilizationSupported ||
-                                snapshotState.isVideoStabilizationSupported
+                                val activeQuality = prioritizedQualities.first()
+                                val (qW, qH) = when (activeQuality) {
+                                    Quality.UHD -> 3840 to 2160
+                                    Quality.FHD -> 1920 to 1080
+                                    Quality.HD -> 1280 to 720
+                                    else -> 720 to 480
+                                }
+                                val selectedFps = targetBindingRequest.core.videoFps ?: snapshotState.videoFps
+                                val selectedCodec = targetBindingRequest.core.videoCodec ?: snapshotState.videoCodec
+                                val selectedEis = targetBindingRequest.core.isVideoStabilizationEnabled
+                                    ?: snapshotState.isVideoStabilizationEnabled
+                                val nominalFps = when (selectedFps) {
+                                    VideoFpsOption.FPS_120 -> 120
+                                    VideoFpsOption.FPS_60 -> 60
+                                    VideoFpsOption.FPS_30 -> 30
+                                    VideoFpsOption.FPS_24 -> 24
+                                    VideoFpsOption.FPS_AUTO -> 30
+                                }
+                                val baseBitrate = com.example.util.VideoEncoderUtil.calculateNominalBitrate(qW, qH, nominalFps)
+                                val targetBitrate = if (selectedCodec == VideoCodecOption.HEVC) {
+                                    (baseBitrate * 0.72).toInt().coerceAtLeast(1_500_000)
+                                } else {
+                                    baseBitrate
+                                }
+                                val stabilizationSupported = videoProbe.isStabilizationSupported ||
+                                    snapshotState.isVideoStabilizationSupported
 
-                            val fallbackQuality = prioritizedQualities.last()
-                            val qualitySelector = QualitySelector.fromOrderedList(
-                                prioritizedQualities,
-                                FallbackStrategy.lowerQualityOrHigherThan(fallbackQuality)
-                            )
+                                val fallbackQuality = prioritizedQualities.last()
+                                val qualitySelector = QualitySelector.fromOrderedList(
+                                    prioritizedQualities,
+                                    FallbackStrategy.lowerQualityOrHigherThan(fallbackQuality)
+                                )
+                                val videoAspectRatio = when (targetBindingRequest.core.aspectRatio) {
+                                    CaptureAspectRatio.RATIO_4_3 -> AspectRatio.RATIO_4_3
+                                    CaptureAspectRatio.RATIO_16_9, CaptureAspectRatio.RATIO_FULL -> AspectRatio.RATIO_16_9
+                                    CaptureAspectRatio.RATIO_1_1 -> AspectRatio.RATIO_4_3
+                                }
 
-                            val videoAspectRatio = when (targetBindingRequest.core.aspectRatio) {
-                                CaptureAspectRatio.RATIO_4_3 -> AspectRatio.RATIO_4_3
-                                CaptureAspectRatio.RATIO_16_9, CaptureAspectRatio.RATIO_FULL -> AspectRatio.RATIO_16_9
-                                CaptureAspectRatio.RATIO_1_1 -> AspectRatio.RATIO_4_3
-                            }
-
-                            try {
                                 val recorder = Recorder.Builder()
                                     .setVideoCapabilitiesSource(effectiveCapSource)
                                     .setQualitySelector(qualitySelector)
@@ -1534,111 +1587,87 @@ fun CameraViewfinder(
                                         android.util.Range(selectedFps.fps, selectedFps.fps)
                                     )
                                 }
-                                val videoCapture = videoCaptureBuilder.build()
+                                buildPreviewUseCase() to videoCaptureBuilder.build()
+                            }
+                        } else {
+                            null
+                        }
 
-                                val videoPreview = buildPreviewUseCase()
-                                val boundCam = cameraProvider.bindToLifecycle(
-                                    lifecycleOwner,
-                                    selector,
-                                    videoPreview,
-                                    videoCapture
-                                )
-                                attachBoundPreview(videoPreview)
-                                videoCaptureInstance = videoCapture
-                                boundCam
-                            } catch (e: Exception) {
-                                android.util.Log.w(
-                                    "CameraViewfinder",
-                                    "VideoCapture binding with preferred quality failed; attempting safe fallback",
-                                    e
-                                )
-                                fun tryBindFallbackRecorder(
-                                    capSource: Int,
-                                    selectorForFallback: QualitySelector
-                                ): androidx.camera.core.Camera? {
-                                    try {
-                                        cameraProvider.unbindAll()
-                                    } catch (_: Throwable) {}
-                                    val fallbackVideoPreview = Preview.Builder()
-                                        .setTargetRotation(displayRotation)
-                                        .setDynamicRange(DynamicRange.SDR)
-                                        .build()
-                                    val fallbackRecorder = Recorder.Builder()
-                                        .setVideoCapabilitiesSource(capSource)
-                                        .setQualitySelector(selectorForFallback)
-                                        .build()
-                                    val fallbackCapture = VideoCapture.Builder(SdrScopedVideoOutput(fallbackRecorder))
-                                        .setDynamicRange(DynamicRange.SDR)
-                                        .setTargetRotation(displayRotation)
-                                        .build()
-                                    val boundCam = cameraProvider.bindToLifecycle(
-                                        lifecycleOwner,
-                                        selector,
-                                        fallbackVideoPreview,
-                                        fallbackCapture
-                                    )
-                                    attachBoundPreview(fallbackVideoPreview)
-                                    videoCaptureInstance = fallbackCapture
-                                    return boundCam
-                                }
-
-                                val relaxedPrimaryFallback = try {
-                                    tryBindFallbackRecorder(
-                                        capSource = effectiveCapSource,
-                                        selectorForFallback = QualitySelector.fromOrderedList(
+                        // Stage 2: Relaxed SDR-scoped fallback (drops custom bitrate/EIS/FPS/aspect constraints).
+                        val stage2Camera = stage1Camera ?: if (supportedQualities.isNotEmpty()) {
+                            tryBindVideoCandidate("stage2_relaxed_sdr") {
+                                val fallbackPreview = Preview.Builder()
+                                    .setTargetRotation(displayRotation)
+                                    .setDynamicRange(DynamicRange.SDR)
+                                    .build()
+                                val fallbackRecorder = Recorder.Builder()
+                                    .setVideoCapabilitiesSource(effectiveCapSource)
+                                    .setQualitySelector(
+                                        QualitySelector.fromOrderedList(
                                             supportedQualities,
                                             FallbackStrategy.lowerQualityOrHigherThan(Quality.LOWEST)
                                         )
                                     )
-                                } catch (fallbackError1: Exception) {
-                                    android.util.Log.w(
-                                        "CameraViewfinder",
-                                        "Relaxed VideoCapture fallback failed: ${fallbackError1.message}",
-                                        fallbackError1
-                                    )
-                                    null
-                                }
-
-                                val codecCapabilitiesFallback = relaxedPrimaryFallback ?: try {
-                                    tryBindFallbackRecorder(
-                                        capSource = Recorder.VIDEO_CAPABILITIES_SOURCE_CODEC_CAPABILITIES,
-                                        selectorForFallback = QualitySelector.fromOrderedList(
-                                            listOf(Quality.FHD, Quality.HD, Quality.SD),
-                                            FallbackStrategy.lowerQualityOrHigherThan(Quality.LOWEST)
-                                        )
-                                    )
-                                } catch (fallbackError2: Exception) {
-                                    android.util.Log.e(
-                                        "CameraViewfinder",
-                                        "VideoCapture binding failed completely. Video recording unavailable on this sensor.",
-                                        fallbackError2
-                                    )
-                                    null
-                                }
-
-                                if (codecCapabilitiesFallback != null) {
-                                    codecCapabilitiesFallback
-                                } else {
-                                    try {
-                                        cameraProvider.unbindAll()
-                                    } catch (_: Throwable) {}
-                                    latestOnCameraError("Video recording unavailable on this sensor", false)
-                                    val previewOnly = buildPreviewUseCase()
-                                    val boundCam = cameraProvider.bindToLifecycle(
-                                        lifecycleOwner,
-                                        selector,
-                                        previewOnly
-                                    )
-                                    attachBoundPreview(previewOnly)
-                                    boundCam
-                                }
+                                    .build()
+                                val fallbackCapture = VideoCapture.Builder(SdrScopedVideoOutput(fallbackRecorder))
+                                    .setDynamicRange(DynamicRange.SDR)
+                                    .setTargetRotation(displayRotation)
+                                    .build()
+                                fallbackPreview to fallbackCapture
                             }
                         } else {
-                            android.util.Log.i(
+                            null
+                        }
+
+                        // Stage 3: Bare CODEC_CAPABILITIES without SdrScopedVideoOutput proxy or forced SDR/ResolutionSelector.
+                        val stage3Camera = stage2Camera ?: tryBindVideoCandidate("stage3_bare_codec_caps") {
+                            val fallbackPreview = Preview.Builder()
+                                .setTargetRotation(displayRotation)
+                                .build()
+                            val fallbackRecorder = Recorder.Builder()
+                                .setVideoCapabilitiesSource(Recorder.VIDEO_CAPABILITIES_SOURCE_CODEC_CAPABILITIES)
+                                .setQualitySelector(
+                                    QualitySelector.fromOrderedList(
+                                        listOf(Quality.FHD, Quality.HD, Quality.SD, Quality.LOWEST),
+                                        FallbackStrategy.lowerQualityOrHigherThan(Quality.LOWEST)
+                                    )
+                                )
+                                .build()
+                            fallbackPreview to VideoCapture.withOutput(fallbackRecorder)
+                        }
+
+                        // Stage 4: Bare Quality.LOWEST with CODEC_CAPABILITIES.
+                        val stage4Camera = stage3Camera ?: tryBindVideoCandidate("stage4_lowest_codec_caps") {
+                            val fallbackPreview = Preview.Builder()
+                                .setTargetRotation(displayRotation)
+                                .build()
+                            val fallbackRecorder = Recorder.Builder()
+                                .setVideoCapabilitiesSource(Recorder.VIDEO_CAPABILITIES_SOURCE_CODEC_CAPABILITIES)
+                                .setQualitySelector(
+                                    QualitySelector.from(
+                                        Quality.LOWEST,
+                                        FallbackStrategy.higherQualityOrLowerThan(Quality.LOWEST)
+                                    )
+                                )
+                                .build()
+                            fallbackPreview to VideoCapture.withOutput(fallbackRecorder)
+                        }
+
+                        // Stage 5: Canonical bare default Recorder + Preview (matches official CameraX minimal setup).
+                        val stage5Camera = stage4Camera ?: tryBindVideoCandidate("stage5_canonical_default") {
+                            val fallbackPreview = Preview.Builder().build()
+                            val fallbackRecorder = Recorder.Builder().build()
+                            fallbackPreview to VideoCapture.withOutput(fallbackRecorder)
+                        }
+
+                        if (stage5Camera != null) {
+                            stage5Camera
+                        } else {
+                            android.util.Log.e(
                                 "CameraViewfinder",
-                                if (!encoderSupport.canEncodeVideo) "No video encoders detected. Preview-only mode enabled."
-                                else "Sensor does not advertise supported video profiles. Preview-only mode enabled."
+                                "All 5 VideoCapture binding stages failed. Falling back to preview-only."
                             )
+                            latestOnCameraError("Video recording unavailable on this sensor", false)
                             val previewOnly = buildPreviewUseCase()
                             val boundCam = cameraProvider.bindToLifecycle(
                                 lifecycleOwner,
@@ -1797,7 +1826,9 @@ internal object CameraXVideoCapabilitiesCache {
     fun get(cameraId: String): CameraXVideoProbeResult? = cache[cameraId]
 
     fun put(cameraId: String, result: CameraXVideoProbeResult) {
-        cache[cameraId] = result
+        if (result.supportedQualities.isNotEmpty()) {
+            cache[cameraId] = result
+        }
     }
 
     fun clearForTesting() {
@@ -1838,6 +1869,22 @@ private fun getCameraVideoStreamSizes(context: Context, cameraIdStr: String): Se
             val recorderSizes = map.getOutputSizes(android.media.MediaRecorder::class.java)?.toSet() ?: emptySet()
             surfaceSizes + recorderSizes
         }
+    } catch (_: Throwable) {
+        emptySet()
+    }
+}
+
+private fun getAllCameraVideoCandidateSizes(context: Context, cameraIdStr: String): Set<android.util.Size> {
+    return try {
+        val cameraManager = context.getSystemService(Context.CAMERA_SERVICE) as? android.hardware.camera2.CameraManager
+            ?: return emptySet()
+        val chars = cameraManager.getCameraCharacteristics(cameraIdStr)
+        val map = chars.get(android.hardware.camera2.CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP)
+            ?: return emptySet()
+        val privateSizes = map.getOutputSizes(android.graphics.ImageFormat.PRIVATE)?.toSet() ?: emptySet()
+        val surfaceSizes = map.getOutputSizes(android.graphics.SurfaceTexture::class.java)?.toSet() ?: emptySet()
+        val recorderSizes = map.getOutputSizes(android.media.MediaRecorder::class.java)?.toSet() ?: emptySet()
+        privateSizes + surfaceSizes + recorderSizes
     } catch (_: Throwable) {
         emptySet()
     }
@@ -1889,7 +1936,7 @@ internal fun resolveValidatedSdrVideoQualities(
                     com.example.util.VideoEncoderUtil.isResolutionAndFpsSupported(
                         width = vp.width,
                         height = vp.height,
-                        fps = vp.frameRate.coerceAtLeast(30),
+                        fps = vp.frameRate,
                         preferredMime = mime,
                         targetBitrate = vp.bitrate
                     )
@@ -1924,7 +1971,7 @@ internal fun resolveValidatedSdrVideoQualities(
                     com.example.util.VideoEncoderUtil.isResolutionAndFpsSupported(
                         width = vp.width,
                         height = vp.height,
-                        fps = vp.frameRate.coerceAtLeast(30),
+                        fps = vp.frameRate,
                         preferredMime = mime,
                         targetBitrate = vp.bitrate
                     )
@@ -1953,7 +2000,7 @@ internal fun resolveValidatedSdrVideoQualities(
                 com.example.util.VideoEncoderUtil.isResolutionAndFpsSupported(
                     width = profile.videoFrameWidth,
                     height = profile.videoFrameHeight,
-                    fps = profile.videoFrameRate.coerceAtLeast(30),
+                    fps = profile.videoFrameRate.coerceAtLeast(1),
                     preferredMime = mime,
                     targetBitrate = profile.videoBitRate
                 )
@@ -1982,6 +2029,7 @@ internal fun createSdrScopedCameraInfo(
         arrayOf(iface)
     ) { proxy, method, args ->
         when (method.name) {
+            "getImplementation" -> proxy
             "getSupportedDynamicRanges" -> sdrSet
             "querySupportedDynamicRanges" -> {
                 val requested = args?.firstOrNull() as? Set<*>
@@ -2092,7 +2140,7 @@ internal fun probeCameraXVideoCapabilities(
     // are absent or quirk-filtered (e.g. Android emulators or auxiliary sensors), provided the camera
     // genuinely advertises stream sizes and a verified MediaCodec video encoder is available.
     val streamSizesFromManager = if (cameraIdStr.isNotEmpty()) {
-        getCameraVideoStreamSizes(context, cameraIdStr)
+        getAllCameraVideoCandidateSizes(context, cameraIdStr)
     } else {
         emptySet()
     }
@@ -2124,17 +2172,22 @@ internal fun probeCameraXVideoCapabilities(
         } catch (_: Throwable) {
             null
         } ?: CAMERAX_SDR_QUALITY_TIERS.mapNotNull { (camcorderQ, quality) ->
-            val (qw, qh) = when (camcorderQ) {
-                android.media.CamcorderProfile.QUALITY_2160P -> 3840 to 2160
-                android.media.CamcorderProfile.QUALITY_1080P -> 1920 to 1080
-                android.media.CamcorderProfile.QUALITY_720P -> 1280 to 720
-                else -> 640 to 480
+            val candidateSizes = when (camcorderQ) {
+                android.media.CamcorderProfile.QUALITY_2160P -> listOf(3840 to 2160)
+                android.media.CamcorderProfile.QUALITY_1080P -> listOf(1920 to 1080)
+                android.media.CamcorderProfile.QUALITY_720P -> listOf(1280 to 720)
+                else -> listOf(720 to 480, 640 to 480)
             }
-            val hasCameraSize = allStreamSizes.any { it.width == qw && it.height == qh } ||
-                allStreamSizes.any { it.width >= qw && it.height >= qh }
-            val hasEncoder = com.example.util.VideoEncoderUtil.isResolutionAndFpsSupported(qw, qh, 30) ||
-                com.example.util.VideoEncoderUtil.isResolutionAndFpsSupported(qw, qh, 24)
-            if (hasCameraSize && hasEncoder) quality else null
+            val matched = candidateSizes.any { (qw, qh) ->
+                val hasCameraSize = allStreamSizes.any { it.width == qw && it.height == qh } ||
+                    allStreamSizes.any { it.width >= qw && it.height >= qh }
+                val hasEncoder = com.example.util.VideoEncoderUtil.isResolutionAndFpsSupported(qw, qh, 30) ||
+                    com.example.util.VideoEncoderUtil.isResolutionAndFpsSupported(qw, qh, 24) ||
+                    com.example.util.VideoEncoderUtil.isResolutionAndFpsSupported(qw, qh, 15) ||
+                    com.example.util.VideoEncoderUtil.isResolutionAndFpsSupported(qw, qh, 0)
+                hasCameraSize && hasEncoder
+            }
+            if (matched) quality else null
         }
 
         if (codecQualities.isNotEmpty()) {
@@ -2161,9 +2214,7 @@ internal fun probeCameraXVideoCapabilities(
         capabilitiesSource = Recorder.VIDEO_CAPABILITIES_SOURCE_CAMCORDER_PROFILE,
         isStabilizationSupported = false,
         supportedQualities = emptyList()
-    ).also {
-        if (cameraIdStr.isNotEmpty()) CameraXVideoCapabilitiesCache.put(cameraIdStr, it)
-    }
+    )
 }
 
 private fun buildPortraitImageAnalysis(
