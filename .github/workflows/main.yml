@@ -12,16 +12,66 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   build:
     name: Build & Test StuDO
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
 
     steps:
       - name: Checkout source code
         uses: actions/checkout@v4
+
+      - name: Load SSH signing key into ssh-agent
+        env:
+          SIGNING_PRIVATE_KEY: ${{ secrets.SIGNING_PRIVATE_KEY }}
+          SIGNING_KEY_PASSPHRASE: ${{ secrets.SIGNING_KEY_PASSPHRASE }}
+        run: |
+          if [ -z "${SIGNING_PRIVATE_KEY:-}" ]; then
+            echo "::error::SIGNING_PRIVATE_KEY secret is not set."
+            exit 1
+          fi
+
+          mkdir -p ~/.ssh
+          chmod 700 ~/.ssh
+
+          CLEAN_KEY="${SIGNING_PRIVATE_KEY//$'\r'/}"
+          printf '%s\n' "${CLEAN_KEY%$'\n'}" > ~/.ssh/signing_key
+          chmod 600 ~/.ssh/signing_key
+
+          ssh-keygen -y -P "${SIGNING_KEY_PASSPHRASE:-}" -f ~/.ssh/signing_key > ~/.ssh/signing_key.pub
+          chmod 644 ~/.ssh/signing_key.pub
+
+          eval "$(ssh-agent -s)"
+          {
+            echo "SSH_AUTH_SOCK=$SSH_AUTH_SOCK"
+            echo "SSH_AGENT_PID=$SSH_AGENT_PID"
+          } >> "$GITHUB_ENV"
+
+          if [ -n "${SIGNING_KEY_PASSPHRASE:-}" ]; then
+            ASKPASS_SCRIPT="$(mktemp)"
+            {
+              echo '#!/usr/bin/env bash'
+              echo 'printf "%s\n" "$SIGNING_KEY_PASSPHRASE"'
+            } > "$ASKPASS_SCRIPT"
+            chmod 700 "$ASKPASS_SCRIPT"
+            DISPLAY=":0" SSH_ASKPASS="$ASKPASS_SCRIPT" SSH_ASKPASS_REQUIRE="force" \
+              ssh-add ~/.ssh/signing_key < /dev/null
+            rm -f "$ASKPASS_SCRIPT"
+          else
+            ssh-add ~/.ssh/signing_key < /dev/null
+          fi
+
+      - name: Configure Git for SSH commit signing
+        run: |
+          git config --local gpg.format ssh
+          git config --local user.signingkey "$HOME/.ssh/signing_key.pub"
+          git config --local commit.gpgsign true
+          git config --local user.name || git config --local user.name "github-actions[bot]"
+          git config --local user.email || git config --local user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
       # Android SDK 36 requires Java 21 for compilation and Robolectric sandboxing
       - name: Set up JDK 21
