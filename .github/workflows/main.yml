@@ -164,11 +164,14 @@ jobs:
           ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
         run: ./gradlew assembleRelease --stacktrace
 
-      - name: Upload StuDO Release APK
+      - name: Upload StuDO Release APKs
         uses: actions/upload-artifact@v4
         with:
-          name: StuDO-release-APK
-          path: app/build/outputs/apk/release/app-release.apk
+          name: StuDO-release-APKs
+          path: |
+            app/build/outputs/apk/release/app-universal-release.apk
+            app/build/outputs/apk/release/app-arm64-v8a-release.apk
+            app/build/outputs/apk/release/app-armeabi-v7a-release.apk
           if-no-files-found: error
           retention-days: 14
 

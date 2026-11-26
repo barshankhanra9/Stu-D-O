@@ -85,14 +85,10 @@ android {
     includeInBundle = true
   }
 
-  // ABI split configuration (opt-in via -PenableAbiSplits=true; disabled by default so
-  // standard assembleRelease produces app/build/outputs/apk/release/app-release.apk).
-  val enableAbiSplits = providers.gradleProperty("enableAbiSplits")
-    .map { it.equals("true", ignoreCase = true) }
-    .getOrElse(false)
+  // ABI split configuration: generate universal, arm64-v8a, and armeabi-v7a APKs.
   splits {
     abi {
-      isEnable = enableAbiSplits
+      isEnable = true
       reset()
       include("arm64-v8a", "armeabi-v7a")
       isUniversalApk = true
