@@ -218,7 +218,7 @@ object WatermarkPainter {
     private fun createAppOrVectorLogo(context: Context?, targetSize: Int): Bitmap {
         if (context != null) {
             try {
-                val resId = context.resources.getIdentifier("studo_camera_icon_1793330171422", "drawable", context.packageName)
+                val resId = context.resources.getIdentifier("studo_logo_lens", "drawable", context.packageName)
                 if (resId != 0) {
                     val opts = BitmapFactory.Options().apply { inPreferredConfig = Bitmap.Config.ARGB_8888 }
                     val rawBmp = BitmapFactory.decodeResource(context.resources, resId, opts)

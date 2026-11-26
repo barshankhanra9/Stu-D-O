@@ -3,6 +3,6 @@
     <item
         android:width="66dp"
         android:height="66dp"
-        android:drawable="@drawable/studo_camera_icon_1793330171422"
+        android:drawable="@drawable/studo_logo_lens"
         android:gravity="center" />
 </layer-list>

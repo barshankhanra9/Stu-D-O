@@ -2468,15 +2468,25 @@ fun AboutHardwareCard(
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.SpaceBetween
         ) {
-            Column {
-                Text(
-                    text = "STU•D•O Pro Camera",
-                    style = AboutTitleStyle
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                StuDOLogo(
+                    size = 42.dp,
+                    isDarkTheme = true,
+                    contentDescription = "StuDO Pro Camera Logo"
                 )
-                Text(
-                    text = "Tap version 5× for Camera Diagnostics",
-                    style = CardSubtitleStyle
-                )
+                Column {
+                    Text(
+                        text = "STU•D•O Pro Camera",
+                        style = AboutTitleStyle
+                    )
+                    Text(
+                        text = "Tap version 5× for Camera Diagnostics",
+                        style = CardSubtitleStyle
+                    )
+                }
             }
             Text(
                 text = "v2.0 Pro",

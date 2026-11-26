@@ -76,7 +76,6 @@ import com.example.ui.components.PortraitBlurEditorDialog
 import com.example.ui.components.PortraitControlsBar
 import com.example.ui.components.ProControlsBar
 import com.example.ui.components.RecycleBinDialog
-import com.example.ui.components.StuDOSplashAnimation
 import com.example.ui.components.VideoSettingsPanel
 import com.example.ui.components.WatermarkStudioScreen
 import com.example.ui.components.liquidGlassSurface
@@ -229,7 +228,13 @@ fun CameraScreen(
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
     val mediaCaptureManager = viewModel.mediaCaptureManager
     val snackbarHostState = remember { SnackbarHostState() }
-    var isSplashFinished by remember { mutableStateOf(false) }
+    val initialCameraPermission = remember(context) {
+        ContextCompat.checkSelfPermission(
+            context,
+            Manifest.permission.CAMERA
+        ) == PackageManager.PERMISSION_GRANTED
+    }
+    var hasSyncedInitialPermission by remember { mutableStateOf(false) }
     var savedBrightnessBeforeScreenFlash by remember { mutableStateOf<Float?>(null) }
 
     fun restoreScreenFlashBrightness() {
@@ -266,7 +271,18 @@ fun CameraScreen(
 
     DisposableEffect(lifecycleOwner, activity, viewModel) {
         val observer = LifecycleEventObserver { _, event ->
-            if (event == Lifecycle.Event.ON_PAUSE || event == Lifecycle.Event.ON_STOP) {
+            if (event == Lifecycle.Event.ON_RESUME) {
+                val hasCamera = ContextCompat.checkSelfPermission(
+                    context,
+                    Manifest.permission.CAMERA
+                ) == PackageManager.PERMISSION_GRANTED
+                if (hasCamera != viewModel.uiState.value.hasPermission) {
+                    viewModel.onPermissionResult(isGranted = hasCamera)
+                    if (hasCamera) {
+                        viewModel.loadGallery(mediaCaptureManager)
+                    }
+                }
+            } else if (event == Lifecycle.Event.ON_PAUSE || event == Lifecycle.Event.ON_STOP) {
                 restoreScreenFlashBrightness()
                 viewModel.dismissScreenFlash()
             }
@@ -341,6 +357,7 @@ fun CameraScreen(
         viewModel.syncLocationPermission(hasLocationPermission)
 
         viewModel.onPermissionResult(isGranted = currentPermission)
+        hasSyncedInitialPermission = true
         if (currentPermission) {
             viewModel.loadGallery(mediaCaptureManager)
         }
@@ -432,12 +449,14 @@ fun CameraScreen(
         }
     }
 
+    val hasCameraPermission = if (hasSyncedInitialPermission) uiState.hasPermission else initialCameraPermission
+
     Box(
         modifier = modifier
             .fillMaxSize()
             .background(StuDOBlack)
     ) {
-        if (!uiState.hasPermission) {
+        if (!hasCameraPermission) {
             PermissionScreen(
                 permanentlyDenied = uiState.permissionPermanentlyDenied,
                 onRequestPermission = {
@@ -920,15 +939,6 @@ fun CameraScreen(
                     fontSize = 13.sp
                 )
             }
-        }
-
-        // Cinematic Liquid Glass Opening Logo Animation Overlay
-        if (!isSplashFinished) {
-            StuDOSplashAnimation(
-                onAnimationFinished = {
-                    isSplashFinished = true
-                }
-            )
         }
     }
 }

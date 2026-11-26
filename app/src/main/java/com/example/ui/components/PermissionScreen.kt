@@ -3,9 +3,8 @@ package com.example.ui.components
 import android.content.Intent
 import android.net.Uri
 import android.provider.Settings
-import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
-import androidx.compose.foundation.border
+import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -14,8 +13,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.layout.safeDrawingPadding
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -23,17 +21,14 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
-import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import com.example.R
 import com.example.ui.theme.StuDOBlack
-import com.example.ui.theme.StuDOCarbon
 import com.example.ui.theme.StuDOSilver
 import com.example.ui.theme.StuDOSilverMuted
 import com.example.ui.theme.StuDOWhite
@@ -45,11 +40,15 @@ fun PermissionScreen(
     modifier: Modifier = Modifier
 ) {
     val context = LocalContext.current
+    val isDarkTheme = isSystemInDarkTheme()
+    val pillButtonContainer = if (isDarkTheme) StuDOWhite else Color(0xFFFFFFFF)
+    val pillButtonContent = Color(0xFF111111)
 
     Box(
         modifier = modifier
             .fillMaxSize()
             .background(StuDOBlack)
+            .safeDrawingPadding()
             .padding(28.dp),
         contentAlignment = Alignment.Center
     ) {
@@ -58,23 +57,11 @@ fun PermissionScreen(
             verticalArrangement = Arrangement.Center,
             modifier = Modifier.fillMaxWidth()
         ) {
-            // Refined aperture logo
-            Box(
-                modifier = Modifier
-                    .size(110.dp)
-                    .clip(CircleShape)
-                    .background(StuDOCarbon)
-                    .border(1.dp, StuDOSilver.copy(alpha = 0.3f), CircleShape),
-                contentAlignment = Alignment.Center
-            ) {
-                Image(
-                    painter = painterResource(id = R.drawable.studo_camera_icon_1793330171422),
-                    contentDescription = "StuDO Logo",
-                    modifier = Modifier
-                        .size(86.dp)
-                        .clip(CircleShape)
-                )
-            }
+            StuDOLogo(
+                size = 116.dp,
+                isDarkTheme = true,
+                contentDescription = "StuDO Logo"
+            )
 
             Spacer(modifier = Modifier.height(32.dp))
 
@@ -123,8 +110,8 @@ fun PermissionScreen(
                         } catch (_: android.content.ActivityNotFoundException) {}
                     },
                     colors = ButtonDefaults.buttonColors(
-                        containerColor = StuDOWhite,
-                        contentColor = StuDOBlack
+                        containerColor = pillButtonContainer,
+                        contentColor = pillButtonContent
                     ),
                     shape = RoundedCornerShape(28.dp),
                     modifier = Modifier
@@ -134,6 +121,7 @@ fun PermissionScreen(
                 ) {
                     Text(
                         text = "Open Settings",
+                        color = pillButtonContent,
                         fontWeight = FontWeight.SemiBold,
                         fontSize = 15.sp
                     )
@@ -142,8 +130,8 @@ fun PermissionScreen(
                 Button(
                     onClick = onRequestPermission,
                     colors = ButtonDefaults.buttonColors(
-                        containerColor = StuDOWhite,
-                        contentColor = StuDOBlack
+                        containerColor = pillButtonContainer,
+                        contentColor = pillButtonContent
                     ),
                     shape = RoundedCornerShape(28.dp),
                     modifier = Modifier
@@ -152,7 +140,8 @@ fun PermissionScreen(
                         .testTag("grant_camera_permission_button")
                 ) {
                     Text(
-                        text = "Enable Camera",
+                        text = "Grant Camera Access",
+                        color = pillButtonContent,
                         fontWeight = FontWeight.SemiBold,
                         fontSize = 15.sp
                     )

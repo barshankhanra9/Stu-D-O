@@ -304,19 +304,29 @@ fun CameraSettingsDialog(
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                Column {
-                    Text(
-                        text = "SETTINGS",
-                        color = StuDOWhite,
-                        fontSize = 18.sp,
-                        fontWeight = FontWeight.Bold,
-                        letterSpacing = 2.sp
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(12.dp)
+                ) {
+                    StuDOLogo(
+                        size = 36.dp,
+                        isDarkTheme = true,
+                        contentDescription = "StuDO Logo"
                     )
-                    Text(
-                        text = "Preferences automatically saved across sessions",
-                        color = StuDOSilverMuted,
-                        fontSize = 12.sp
-                    )
+                    Column {
+                        Text(
+                            text = "SETTINGS",
+                            color = StuDOWhite,
+                            fontSize = 18.sp,
+                            fontWeight = FontWeight.Bold,
+                            letterSpacing = 2.sp
+                        )
+                        Text(
+                            text = "Preferences automatically saved across sessions",
+                            color = StuDOSilverMuted,
+                            fontSize = 12.sp
+                        )
+                    }
                 }
 
                 IconButton(
