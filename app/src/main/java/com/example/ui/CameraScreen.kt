@@ -69,7 +69,7 @@ import com.example.ui.components.CameraSettingsDialog
 import com.example.ui.components.CameraTopBar
 import com.example.ui.components.CameraViewfinder
 import com.example.ui.components.CountdownTimerOverlay
-import com.example.ui.components.LiveHistogramView
+import com.example.ui.components.FloatingLiveHistogramOverlay
 import com.example.ui.components.NightControlsBar
 import com.example.ui.components.PermissionScreen
 import com.example.ui.components.PhotoPreviewDialog
@@ -480,6 +480,7 @@ fun CameraScreen(
             val onCameraError = remember(viewModel) { { msg: String, fatal: Boolean -> viewModel.onCameraHardwareError(msg, fatal) } }
             val onTargetRotationChanged = remember(viewModel) { { rot: Int -> viewModel.onTargetRotationChanged(rot) } }
             val onHistogramData = remember(viewModel) { { bins: List<Float> -> viewModel.updateHistogramBins(bins) } }
+            val onHistogramSampled = remember(viewModel) { { data: com.example.model.HistogramData -> viewModel.updateHistogramData(data) } }
             val onActiveLensFocalLengthChanged = remember(viewModel) {
                 { focalMm: Float?, physicalId: String? ->
                     viewModel.onActiveLensFocalLengthChanged(focalMm, physicalId)
@@ -585,6 +586,7 @@ fun CameraScreen(
                 onCameraError = onCameraError,
                 onTargetRotationChanged = onTargetRotationChanged,
                 onHistogramData = onHistogramData,
+                onHistogramSampled = onHistogramSampled,
                 onActiveLensFocalLengthChanged = onActiveLensFocalLengthChanged,
                 onFullScreenAspectRatioChanged = onFullScreenAspectRatioChanged,
                 onLowLightChanged = onLowLightChanged,
@@ -616,6 +618,21 @@ fun CameraScreen(
                         }
                     }
             ) {
+                // Floating Draggable Liquid Glass Live Histogram HUD Overlay (Luma & RGB + Clipping)
+                if (uiState.isHistogramEnabled && !isFullScreenModalOpen) {
+                    val onToggleHistogramMode = remember(viewModel) { { viewModel.toggleHistogramMode() } }
+                    val onToggleHistogramCollapsed = remember(viewModel) { { viewModel.toggleHistogramCollapsed() } }
+                    FloatingLiveHistogramOverlay(
+                        exposureIndex = uiState.exposureIndex,
+                        histogramDataState = viewModel.histogramData,
+                        histogramMode = uiState.histogramMode,
+                        isCollapsed = uiState.isHistogramCollapsed,
+                        hapticsEnabled = uiState.isHapticFeedbackEnabled,
+                        onToggleMode = onToggleHistogramMode,
+                        onToggleCollapsed = onToggleHistogramCollapsed
+                    )
+                }
+
                 // Outside-tap scrim: dismissing any open top drawer/panel or Pro slider without triggering tap-to-focus
                 if (uiState.activeCameraPanel != ActiveCameraPanel.NONE ||
                     uiState.activeProTab != ProControlTab.NONE
@@ -722,18 +739,6 @@ fun CameraScreen(
                         onToggleStabilization = onToggleVideoStabilization,
                         onToggleAudio = onToggleAudio,
                         onClose = { viewModel.dismissVideoSettingsPanel() }
-                    )
-                }
-
-                // Live Histogram HUD Overlay (real Y-plane luminance distribution)
-                if (uiState.isHistogramEnabled && !isFullScreenModalOpen) {
-                    LiveHistogramView(
-                        exposureIndex = uiState.exposureIndex,
-                        histogramBinsState = viewModel.histogramBins,
-                        modifier = Modifier
-                            .align(Alignment.TopEnd)
-                            .statusBarsPadding()
-                            .padding(top = 68.dp, end = 16.dp)
                     )
                 }
 

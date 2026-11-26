@@ -313,6 +313,7 @@ fun CameraViewfinder(
     onCameraError: (String, Boolean) -> Unit = { _, _ -> },
     onTargetRotationChanged: (Int) -> Unit = {},
     onHistogramData: (List<Float>) -> Unit = {},
+    onHistogramSampled: (com.example.model.HistogramData) -> Unit = {},
     onActiveLensFocalLengthChanged: (Float?, String?) -> Unit = { _, _ -> },
     onFullScreenAspectRatioChanged: (Float) -> Unit = {},
     onLowLightChanged: (Boolean) -> Unit = {},
@@ -343,6 +344,7 @@ fun CameraViewfinder(
     val latestOnCameraError by rememberUpdatedState(onCameraError)
     val latestOnTargetRotationChanged by rememberUpdatedState(onTargetRotationChanged)
     val latestOnHistogramData by rememberUpdatedState(onHistogramData)
+    val latestOnHistogramSampled by rememberUpdatedState(onHistogramSampled)
     val latestOnActiveLensFocalLengthChanged by rememberUpdatedState(onActiveLensFocalLengthChanged)
     val latestOnFullScreenAspectRatioChanged by rememberUpdatedState(onFullScreenAspectRatioChanged)
     val latestOnLowLightChanged by rememberUpdatedState(onLowLightChanged)
@@ -1296,6 +1298,7 @@ fun CameraViewfinder(
                                     portraitPipelineManager = activePortraitMgr,
                                     glViewProvider = { glPortraitViewInstance },
                                     onHistogramData = { bins -> latestOnHistogramData(bins) },
+                                    onHistogramSampled = { data -> latestOnHistogramSampled(data) },
                                     onBackdropBitmap = { bmp -> blurredBackdropBitmap = bmp },
                                     onPortraitTelemetry = { hasSubject, count, source ->
                                         latestOnPortraitStatusUpdate?.invoke(
@@ -1388,6 +1391,7 @@ fun CameraViewfinder(
                                         session = session,
                                         aspectRatio = targetBindingRequest.core.aspectRatio,
                                         onHistogramData = { bins -> latestOnHistogramData(bins) },
+                                        onHistogramSampled = { data -> latestOnHistogramSampled(data) },
                                         onBackdropBitmap = { bmp -> blurredBackdropBitmap = bmp }
                                     )
                                     session.analysisExecutor = exec
@@ -1439,6 +1443,7 @@ fun CameraViewfinder(
                                 session = session,
                                 aspectRatio = targetBindingRequest.core.aspectRatio,
                                 onHistogramData = { bins -> latestOnHistogramData(bins) },
+                                onHistogramSampled = { data -> latestOnHistogramSampled(data) },
                                 onBackdropBitmap = { bmp -> blurredBackdropBitmap = bmp }
                             )
                             session.analysisExecutor = exec
@@ -2344,6 +2349,7 @@ private fun buildPortraitImageAnalysis(
     portraitPipelineManager: PortraitPipelineManager,
     glViewProvider: () -> PortraitLiveBlurGLSurfaceView?,
     onHistogramData: (List<Float>) -> Unit,
+    onHistogramSampled: (com.example.model.HistogramData) -> Unit,
     onBackdropBitmap: (Bitmap) -> Unit,
     onPortraitTelemetry: (Boolean, Int, PortraitDepthSource) -> Unit
 ): Pair<ImageAnalysis, ExecutorService> {
@@ -2370,16 +2376,16 @@ private fun buildPortraitImageAnalysis(
         .build()
     var lastHistogramNs = 0L
     var lastBackdropNs = 0L
-    val bins = IntArray(24)
+    val histogramScratch = com.example.util.HistogramSampler.ScratchBuffers()
     val backdropPixels = IntArray(36 * 48)
 
     analysis.setAnalyzer(exec) { imageProxy ->
         try {
             if (!session.isDisposed.get() && !session.isAnalysisPaused.get() && session.isPortraitActive.get()) {
                 val nowNs = System.nanoTime()
-                if (session.isHistogramActive.get() && (nowNs - lastHistogramNs >= 100_000_000L)) {
+                if (session.isHistogramActive.get() && (nowNs - lastHistogramNs >= 66_000_000L)) {
                     lastHistogramNs = nowNs
-                    sampleHistogramBins(imageProxy, bins, mainExecutor, session, onHistogramData)
+                    sampleHistogramBins(imageProxy, histogramScratch, mainExecutor, session, onHistogramData, onHistogramSampled)
                 }
                 if (session.isBackdropActive.get() && (nowNs - lastBackdropNs >= 260_000_000L)) {
                     lastBackdropNs = nowNs
@@ -2413,6 +2419,7 @@ private fun buildCombinedImageAnalysis(
     session: ViewfinderSessionHolder,
     aspectRatio: CaptureAspectRatio,
     onHistogramData: (List<Float>) -> Unit,
+    onHistogramSampled: (com.example.model.HistogramData) -> Unit,
     onBackdropBitmap: (Bitmap) -> Unit
 ): Pair<ImageAnalysis, ExecutorService> {
     val exec = Executors.newSingleThreadExecutor()
@@ -2438,18 +2445,18 @@ private fun buildCombinedImageAnalysis(
         .build()
     var lastHistogramNs = 0L
     var lastBackdropNs = 0L
-    val bins = IntArray(24)
+    val histogramScratch = com.example.util.HistogramSampler.ScratchBuffers()
     val backdropPixels = IntArray(36 * 48)
     analysis.setAnalyzer(exec) { imageProxy ->
         try {
             if (!session.isDisposed.get() && !session.isAnalysisPaused.get()) {
                 val nowNs = System.nanoTime()
-                val wantHistogram = session.isHistogramActive.get() && (nowNs - lastHistogramNs >= 100_000_000L)
+                val wantHistogram = session.isHistogramActive.get() && (nowNs - lastHistogramNs >= 66_000_000L)
                 val wantBackdrop = session.isBackdropActive.get() && (nowNs - lastBackdropNs >= 260_000_000L)
 
                 if (wantHistogram) {
                     lastHistogramNs = nowNs
-                    sampleHistogramBins(imageProxy, bins, mainExecutor, session, onHistogramData)
+                    sampleHistogramBins(imageProxy, histogramScratch, mainExecutor, session, onHistogramData, onHistogramSampled)
                 }
 
                 if (wantBackdrop) {
@@ -2467,39 +2474,18 @@ private fun buildCombinedImageAnalysis(
 
 private fun sampleHistogramBins(
     imageProxy: androidx.camera.core.ImageProxy,
-    bins: IntArray,
+    scratch: com.example.util.HistogramSampler.ScratchBuffers,
     mainExecutor: java.util.concurrent.Executor,
     session: ViewfinderSessionHolder,
-    onHistogramData: (List<Float>) -> Unit
+    onHistogramData: (List<Float>) -> Unit,
+    onHistogramSampled: (com.example.model.HistogramData) -> Unit
 ) {
-    val yPlane = imageProxy.planes.firstOrNull() ?: return
-    val buf = yPlane.buffer
-    val rowStride = yPlane.rowStride
-    val pixelStride = yPlane.pixelStride
-    val w = imageProxy.width
-    val h = imageProxy.height
-    bins.fill(0)
-    val limit = buf.limit()
-    var row = 0
-    while (row < h) {
-        val rowOffset = row * rowStride
-        var col = 0
-        while (col < w) {
-            val idx = rowOffset + col * pixelStride
-            if (idx in 0 until limit) {
-                val yVal = buf.get(idx).toInt() and 0xFF
-                val binIdx = (yVal * 24 / 256).coerceIn(0, 23)
-                bins[binIdx]++
-            }
-            col += 8
-        }
-        row += 8
-    }
-    val maxBin = bins.maxOrNull()?.coerceAtLeast(1) ?: 1
-    val normalized = List(24) { i -> bins[i].toFloat() / maxBin.toFloat() }
+    val sampled = com.example.util.HistogramSampler.sampleImageProxy(imageProxy, scratch)
+    if (!sampled.hasData) return
     mainExecutor.execute {
         if (!session.isDisposed.get() && session.isHistogramActive.get()) {
-            onHistogramData(normalized)
+            onHistogramData(sampled.lumaBins)
+            onHistogramSampled(sampled)
         }
     }
 }

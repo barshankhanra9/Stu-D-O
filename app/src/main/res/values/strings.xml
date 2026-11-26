@@ -45,4 +45,12 @@
     <string name="night_status_pill_cd">Night Mode, estimated capture %1$s</string>
     <string name="night_auto_cd">Auto exposure duration</string>
     <string name="night_max_cd">Max exposure duration</string>
+    <string name="histogram_title">HISTOGRAM</string>
+    <string name="histogram_mode_luma">LUMA</string>
+    <string name="histogram_mode_rgb">RGB</string>
+    <string name="histogram_toggle_mode_cd">Histogram mode %1$s, tap to switch</string>
+    <string name="histogram_shadow_clip_cd">Shadow clipping indicator</string>
+    <string name="histogram_highlight_clip_cd">Highlight clipping indicator</string>
+    <string name="histogram_collapsed_cd">Compact live histogram, double tap to expand</string>
+    <string name="histogram_expanded_cd">Live histogram, drag to reposition or double tap to collapse</string>
 </resources>

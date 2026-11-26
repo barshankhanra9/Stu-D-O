@@ -111,6 +111,30 @@ enum class ActiveCameraPanel {
     VIDEO_SETTINGS
 }
 
+enum class HistogramDisplayMode(val label: String) {
+    LUMA("LUMA"),
+    RGB("RGB")
+}
+
+@Immutable
+data class HistogramData(
+    val lumaBins: List<Float> = emptyList(),
+    val redBins: List<Float> = emptyList(),
+    val greenBins: List<Float> = emptyList(),
+    val blueBins: List<Float> = emptyList(),
+    val shadowClipFraction: Float = 0f,
+    val highlightClipFraction: Float = 0f
+) {
+    val isShadowClipping: Boolean get() = shadowClipFraction > CLIP_THRESHOLD
+    val isHighlightClipping: Boolean get() = highlightClipFraction > CLIP_THRESHOLD
+    val hasData: Boolean get() = lumaBins.size >= 2
+
+    companion object {
+        const val CLIP_THRESHOLD = 0.02f
+        val Empty = HistogramData()
+    }
+}
+
 enum class CaptureAspectRatio(
     val displayName: String,
     val cameraXRatio: Int,
@@ -965,6 +989,8 @@ data class CameraUiState(
     val isExposureSupported: Boolean = false,
     val showExposureSlider: Boolean = false,
     val isHistogramEnabled: Boolean = false,
+    val histogramMode: HistogramDisplayMode = HistogramDisplayMode.LUMA,
+    val isHistogramCollapsed: Boolean = false,
     val isShutterSoundEnabled: Boolean = true,
     val isQuickSettingsOpen: Boolean = false,
     val isVideoSettingsPanelOpen: Boolean = false,

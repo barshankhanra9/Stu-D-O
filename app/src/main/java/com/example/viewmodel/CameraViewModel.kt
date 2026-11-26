@@ -98,6 +98,9 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
     private val _histogramBins = MutableStateFlow<List<Float>>(emptyList())
     val histogramBins: StateFlow<List<Float>> = _histogramBins.asStateFlow()
 
+    private val _histogramData = MutableStateFlow(com.example.model.HistogramData.Empty)
+    val histogramData: StateFlow<com.example.model.HistogramData> = _histogramData.asStateFlow()
+
     private var activeCamera: Camera? = null
     private var activeCameraControl: CameraControl? = null
     private var activeCameraInfo: CameraInfo? = null
@@ -170,6 +173,7 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
                 screenFlashMode = preferencesRepo.getScreenFlashMode(),
                 isLevelIndicatorEnabled = preferencesRepo.isLevelEnabled(),
                 isHistogramEnabled = preferencesRepo.isHistogramEnabled(),
+                histogramMode = preferencesRepo.getHistogramMode(),
                 isShutterSoundEnabled = preferencesRepo.isShutterSoundEnabled(),
                 isHapticFeedbackEnabled = preferencesRepo.isHapticFeedbackEnabled(),
                 isKeepScreenAwakeEnabled = preferencesRepo.isKeepScreenAwakeEnabled(),
@@ -649,6 +653,7 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
             }
             if (mode == CameraMode.VIDEO) {
                 _histogramBins.value = emptyList()
+                _histogramData.value = com.example.model.HistogramData.Empty
             }
             if (mode == CameraMode.PRO) {
                 applyProSettingsToPreview()
@@ -738,6 +743,7 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
             liveCaptureFocalLengthMm = null
             boundCameraCharacteristicFocalLengthMm = null
             _histogramBins.value = emptyList()
+            _histogramData.value = com.example.model.HistogramData.Empty
             _uiState.update {
                 it.copy(
                     lensFacing = nextFacing,
@@ -2359,8 +2365,29 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
         preferencesRepo.saveHistogramEnabled(next)
         if (!next) {
             _histogramBins.value = emptyList()
+            _histogramData.value = com.example.model.HistogramData.Empty
         }
         _uiState.update { it.copy(isHistogramEnabled = next) }
+    }
+
+    fun toggleHistogramMode() {
+        val next = if (_uiState.value.histogramMode == com.example.model.HistogramDisplayMode.LUMA) {
+            com.example.model.HistogramDisplayMode.RGB
+        } else {
+            com.example.model.HistogramDisplayMode.LUMA
+        }
+        setHistogramMode(next)
+    }
+
+    fun setHistogramMode(mode: com.example.model.HistogramDisplayMode) {
+        if (_uiState.value.histogramMode != mode) {
+            preferencesRepo.saveHistogramMode(mode)
+            _uiState.update { it.copy(histogramMode = mode) }
+        }
+    }
+
+    fun toggleHistogramCollapsed() {
+        _uiState.update { it.copy(isHistogramCollapsed = !it.isHistogramCollapsed) }
     }
 
     fun toggleShutterSound() {
@@ -3375,6 +3402,21 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
 
     fun updateHistogramBins(bins: List<Float>) {
         _histogramBins.value = bins
+        _histogramData.value = if (bins.isEmpty()) {
+            com.example.model.HistogramData.Empty
+        } else {
+            com.example.model.HistogramData(
+                lumaBins = bins,
+                redBins = bins,
+                greenBins = bins,
+                blueBins = bins
+            )
+        }
+    }
+
+    fun updateHistogramData(data: com.example.model.HistogramData) {
+        _histogramData.value = data
+        _histogramBins.value = data.lumaBins
     }
 
     fun onTargetRotationChanged(rotation: Int) {

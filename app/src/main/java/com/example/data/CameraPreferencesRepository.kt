@@ -34,6 +34,7 @@ class CameraPreferencesRepository(context: Context) {
         private const val KEY_GRID = "pref_grid"
         private const val KEY_LEVEL = "pref_level"
         private const val KEY_HISTOGRAM = "pref_histogram"
+        private const val KEY_HISTOGRAM_MODE = "pref_histogram_mode"
         private const val KEY_SHUTTER_SOUND = "pref_shutter_sound"
         private const val KEY_HAPTIC_FEEDBACK = "pref_haptic_feedback"
         private const val KEY_KEEP_SCREEN_AWAKE = "pref_keep_screen_awake"
@@ -279,6 +280,21 @@ class CameraPreferencesRepository(context: Context) {
     fun isHistogramEnabled(): Boolean = prefs.getBoolean(KEY_HISTOGRAM, false)
     fun saveHistogramEnabled(enabled: Boolean) {
         prefs.edit().putBoolean(KEY_HISTOGRAM, enabled).apply()
+    }
+
+    fun getHistogramMode(): com.example.model.HistogramDisplayMode {
+        val name = prefs.getString(KEY_HISTOGRAM_MODE, com.example.model.HistogramDisplayMode.LUMA.name)
+        return try {
+            com.example.model.HistogramDisplayMode.valueOf(
+                name ?: com.example.model.HistogramDisplayMode.LUMA.name
+            )
+        } catch (_: Exception) {
+            com.example.model.HistogramDisplayMode.LUMA
+        }
+    }
+
+    fun saveHistogramMode(mode: com.example.model.HistogramDisplayMode) {
+        prefs.edit().putString(KEY_HISTOGRAM_MODE, mode.name).apply()
     }
 
     // Shutter Sound
