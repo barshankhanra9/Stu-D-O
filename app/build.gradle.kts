@@ -27,11 +27,22 @@ android {
   // and updating Android apps in AI Studio.
   signingConfigs {
     create("release") {
-      val keystorePath = System.getenv("KEYSTORE_PATH") ?: "${rootDir}/my-upload-key.jks"
-      storeFile = file(keystorePath)
-      storePassword = System.getenv("STORE_PASSWORD")
-      keyAlias = "upload"
-      keyPassword = System.getenv("KEY_PASSWORD")
+      val envKeystoreFile = System.getenv("KEYSTORE_FILE")?.takeIf { it.isNotBlank() }
+      storeFile = if (envKeystoreFile != null) {
+        val moduleRelative = file(envKeystoreFile)
+        val rootRelative = rootProject.file(envKeystoreFile)
+        if (moduleRelative.exists() || !rootRelative.exists()) moduleRelative else rootRelative
+      } else {
+        val keystorePath = System.getenv("KEYSTORE_PATH")?.takeIf { it.isNotBlank() }
+          ?: "${rootDir}/my-upload-key.jks"
+        file(keystorePath)
+      }
+      storePassword = System.getenv("ANDROID_STORE_PASSWORD")?.takeIf { it.isNotBlank() }
+        ?: System.getenv("STORE_PASSWORD")
+      keyAlias = System.getenv("ANDROID_KEY_ALIAS")?.takeIf { it.isNotBlank() }
+        ?: "upload"
+      keyPassword = System.getenv("ANDROID_KEY_PASSWORD")?.takeIf { it.isNotBlank() }
+        ?: System.getenv("KEY_PASSWORD")
     }
     create("debugConfig") {
       storeFile = file("${rootDir}/debug.keystore")
@@ -74,17 +85,11 @@ android {
     includeInBundle = true
   }
 
-  // ABI split configuration for lean GitHub APK releases:
-  // Enabled automatically for release APK builds (or when -PenableAbiSplits=true is passed),
-  // while preserving single-APK debug output unless explicitly requested.
-  val isReleaseApkTask = gradle.startParameter.taskNames.any { taskName ->
-    (taskName.contains("release", ignoreCase = true) && !taskName.contains("bundle", ignoreCase = true)) ||
-      taskName.equals("assemble", ignoreCase = true) ||
-      taskName.endsWith(":assemble", ignoreCase = true)
-  }
+  // ABI split configuration (opt-in via -PenableAbiSplits=true; disabled by default so
+  // standard assembleRelease produces app/build/outputs/apk/release/app-release.apk).
   val enableAbiSplits = providers.gradleProperty("enableAbiSplits")
     .map { it.equals("true", ignoreCase = true) }
-    .getOrElse(isReleaseApkTask)
+    .getOrElse(false)
   splits {
     abi {
       isEnable = enableAbiSplits
