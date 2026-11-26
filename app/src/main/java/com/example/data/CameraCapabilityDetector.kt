@@ -25,6 +25,9 @@ data class PhysicalCameraSubSensor(
     val maxResolutionRawSizes: List<Size>,
     val isUhrSupported: Boolean,
     val availableFocalLengths: List<Float> = emptyList(),
+    val minimumFocusDistance: Float = 0f,
+    val sensorPhysicalSizeMm: android.util.SizeF? = null,
+    val proCapabilities: com.example.model.ProCameraCapabilities = com.example.model.ProCameraCapabilities(),
     val isDepthOutputSupported: Boolean = false,
     val depth16Sizes: List<Size> = emptyList(),
     val depthPointCloudSizes: List<Size> = emptyList()
@@ -67,6 +70,8 @@ data class CameraSensorCapability(
     val isOisSupported: Boolean = false,
     val targetFpsRanges: List<Range<Int>> = emptyList(),
     val availableFocalLengths: List<Float> = emptyList(),
+    val minimumFocusDistance: Float = 0f,
+    val sensorPhysicalSizeMm: android.util.SizeF? = null,
     val isDepthOutputSupported: Boolean = false,
     val depth16Sizes: List<Size> = emptyList(),
     val depthPointCloudSizes: List<Size> = emptyList()
@@ -245,6 +250,8 @@ class CameraCapabilityDetector(private val context: Context) {
     @Volatile
     private var cachedCameras: List<CameraSensorCapability>? = null
 
+    private val cameraByIdCache = java.util.concurrent.ConcurrentHashMap<String, CameraSensorCapability>()
+
     fun detectAllCameras(forceRefresh: Boolean = false): List<CameraSensorCapability> {
         if (!forceRefresh) {
             cachedCameras?.let { return it }
@@ -257,6 +264,7 @@ class CameraCapabilityDetector(private val context: Context) {
                     val characteristics = cameraManager.getCameraCharacteristics(id)
                     val cap = parseCharacteristics(id, characteristics)
                     capabilities.add(cap)
+                    cameraByIdCache[id] = cap
                 } catch (_: Exception) {}
             }
         } catch (_: Exception) {}
@@ -267,7 +275,30 @@ class CameraCapabilityDetector(private val context: Context) {
         return snapshot
     }
 
-    fun getCapabilityForLens(isFrontCamera: Boolean): CameraSensorCapability? {
+    fun getCapabilityForCameraId(cameraId: String?): CameraSensorCapability? {
+        if (cameraId.isNullOrBlank()) return null
+        detectAllCameras().firstOrNull { it.cameraId == cameraId }?.let { return it }
+        cameraByIdCache[cameraId]?.let { return it }
+        return try {
+            val chars = cameraManager.getCameraCharacteristics(cameraId)
+            parseCharacteristics(cameraId, chars).also { cap ->
+                cameraByIdCache[cameraId] = cap
+            }
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    fun getCapabilityForLens(isFrontCamera: Boolean): CameraSensorCapability? =
+        getCapabilityForLens(isFrontCamera = isFrontCamera, selectedBackCameraId = null)
+
+    fun getCapabilityForLens(
+        isFrontCamera: Boolean,
+        selectedBackCameraId: String? = null
+    ): CameraSensorCapability? {
+        if (!isFrontCamera && !selectedBackCameraId.isNullOrBlank()) {
+            getCapabilityForCameraId(selectedBackCameraId)?.let { return it }
+        }
         val targetFacing = if (isFrontCamera) {
             CameraCharacteristics.LENS_FACING_FRONT
         } else {
@@ -422,6 +453,9 @@ class CameraCapabilityDetector(private val context: Context) {
 
                     val pFocalLengths = physChars.get(CameraCharacteristics.LENS_INFO_AVAILABLE_FOCAL_LENGTHS)
                         ?.filter { it.isFinite() && it > 0f } ?: emptyList()
+                    val pMinFocusDist = physChars.get(CameraCharacteristics.LENS_INFO_MINIMUM_FOCUS_DISTANCE) ?: 0f
+                    val pSensorPhysSize = physChars.get(CameraCharacteristics.SENSOR_INFO_PHYSICAL_SIZE)
+                    val pProCaps = parseProCapabilities(physChars)
                     val pCapsAll = physChars.get(CameraCharacteristics.REQUEST_AVAILABLE_CAPABILITIES) ?: intArrayOf()
                     val pDepth16Sizes = try {
                         pStandardMap?.getOutputSizes(ImageFormat.DEPTH16)?.toList() ?: emptyList()
@@ -449,6 +483,9 @@ class CameraCapabilityDetector(private val context: Context) {
                             maxResolutionRawSizes = pMaxResRaw.sortedByDescending { it.width.toLong() * it.height.toLong() },
                             isUhrSupported = pUhrSupported,
                             availableFocalLengths = pFocalLengths,
+                            minimumFocusDistance = pMinFocusDist,
+                            sensorPhysicalSizeMm = pSensorPhysSize,
+                            proCapabilities = pProCaps,
                             isDepthOutputSupported = pDepthSupported,
                             depth16Sizes = pDepth16Sizes.sortedByDescending { it.width.toLong() * it.height.toLong() },
                             depthPointCloudSizes = pDepthPointSizes.sortedByDescending { it.width.toLong() * it.height.toLong() }
@@ -474,58 +511,9 @@ class CameraCapabilityDetector(private val context: Context) {
         val recommendedUhr = if (isUhrSupported) maxResJpeg ?: highResJpegSizes.maxByOrNull { it.width.toLong() * it.height.toLong() } else null
 
         // Pro Mode capabilities extraction from CameraCharacteristics
-        val isoRange = chars.get(CameraCharacteristics.SENSOR_INFO_SENSITIVITY_RANGE)
-        val minIso = isoRange?.lower ?: 100
-        val maxIso = isoRange?.upper ?: 3200
-        val isoSteps = mutableListOf<Int>()
-        var curIso = minIso
-        while (curIso <= maxIso) {
-            isoSteps.add(curIso)
-            curIso = when {
-                curIso < 200 -> 200
-                curIso < 400 -> 400
-                curIso < 800 -> 800
-                curIso < 1600 -> 1600
-                curIso < 3200 -> 3200
-                curIso < 6400 -> 6400
-                else -> curIso * 2
-            }
-        }
-        if (isoSteps.isEmpty()) isoSteps.addAll(listOf(100, 200, 400, 800, 1600, 3200))
-
-        val expTimeRange = chars.get(CameraCharacteristics.SENSOR_INFO_EXPOSURE_TIME_RANGE)
-        val minShutter = expTimeRange?.lower ?: 100_000L
-        val maxShutter = expTimeRange?.upper ?: 1_000_000_000L
-
-        val maxFocusDist = chars.get(CameraCharacteristics.LENS_INFO_MINIMUM_FOCUS_DISTANCE) ?: 10f
-        val isManualFocusSupported = maxFocusDist > 0f
-
-        val aeRange = chars.get(CameraCharacteristics.CONTROL_AE_COMPENSATION_RANGE)
-        val aeStepRational = chars.get(CameraCharacteristics.CONTROL_AE_COMPENSATION_STEP)
-        val aeStep = if (aeStepRational != null && aeStepRational.denominator != 0) {
-            aeStepRational.numerator.toFloat() / aeStepRational.denominator.toFloat()
-        } else 0.5f
-
-        val availableAwb = chars.get(CameraCharacteristics.CONTROL_AWB_AVAILABLE_MODES) ?: intArrayOf()
-        val supportedAwb = com.example.model.ProWhitebalanceMode.values().filter { mode ->
-            mode == com.example.model.ProWhitebalanceMode.AUTO || availableAwb.contains(mode.camera2Mode)
-        }
-
-        val proCaps = com.example.model.ProCameraCapabilities(
-            isProSupported = true,
-            minIso = minIso,
-            maxIso = maxIso,
-            supportedIsos = isoSteps.distinct(),
-            minShutterNanos = minShutter,
-            maxShutterNanos = maxShutter,
-            minFocusDistance = 0f,
-            maxFocusDistance = maxFocusDist,
-            isManualFocusSupported = isManualFocusSupported,
-            minEv = aeRange?.lower ?: -4,
-            maxEv = aeRange?.upper ?: 4,
-            evStep = aeStep,
-            supportedAwbModes = if (supportedAwb.isNotEmpty()) supportedAwb else com.example.model.ProWhitebalanceMode.values().toList()
-        )
+        val proCaps = parseProCapabilities(chars)
+        val sensorMinFocusDist = chars.get(CameraCharacteristics.LENS_INFO_MINIMUM_FOCUS_DISTANCE) ?: 0f
+        val sensorPhysSize = chars.get(CameraCharacteristics.SENSOR_INFO_PHYSICAL_SIZE)
 
         // Dynamic Video Capabilities Detection
         val stabModes = chars.get(CameraCharacteristics.CONTROL_AVAILABLE_VIDEO_STABILIZATION_MODES)
@@ -737,9 +725,66 @@ class CameraCapabilityDetector(private val context: Context) {
             isOisSupported = isOisSupported,
             targetFpsRanges = fpsRanges.toList(),
             availableFocalLengths = availableFocalLengths,
+            minimumFocusDistance = sensorMinFocusDist,
+            sensorPhysicalSizeMm = sensorPhysSize,
             isDepthOutputSupported = isDepthOutputSupported || physicalSubSensors.any { it.isDepthOutputSupported },
             depth16Sizes = depth16Sizes.sortedByDescending { it.width.toLong() * it.height.toLong() },
             depthPointCloudSizes = depthPointCloudSizes.sortedByDescending { it.width.toLong() * it.height.toLong() }
+        )
+    }
+
+    private fun parseProCapabilities(chars: CameraCharacteristics): com.example.model.ProCameraCapabilities {
+        val isoRange = chars.get(CameraCharacteristics.SENSOR_INFO_SENSITIVITY_RANGE)
+        val minIso = isoRange?.lower ?: 100
+        val maxIso = isoRange?.upper ?: 3200
+        val isoSteps = mutableListOf<Int>()
+        var curIso = minIso
+        while (curIso <= maxIso) {
+            isoSteps.add(curIso)
+            curIso = when {
+                curIso < 200 -> 200
+                curIso < 400 -> 400
+                curIso < 800 -> 800
+                curIso < 1600 -> 1600
+                curIso < 3200 -> 3200
+                curIso < 6400 -> 6400
+                else -> curIso * 2
+            }
+        }
+        if (isoSteps.isEmpty()) isoSteps.addAll(listOf(100, 200, 400, 800, 1600, 3200))
+
+        val expTimeRange = chars.get(CameraCharacteristics.SENSOR_INFO_EXPOSURE_TIME_RANGE)
+        val minShutter = expTimeRange?.lower ?: 100_000L
+        val maxShutter = expTimeRange?.upper ?: 1_000_000_000L
+
+        val maxFocusDist = chars.get(CameraCharacteristics.LENS_INFO_MINIMUM_FOCUS_DISTANCE) ?: 10f
+        val isManualFocusSupported = maxFocusDist > 0f
+
+        val aeRange = chars.get(CameraCharacteristics.CONTROL_AE_COMPENSATION_RANGE)
+        val aeStepRational = chars.get(CameraCharacteristics.CONTROL_AE_COMPENSATION_STEP)
+        val aeStep = if (aeStepRational != null && aeStepRational.denominator != 0) {
+            aeStepRational.numerator.toFloat() / aeStepRational.denominator.toFloat()
+        } else 0.5f
+
+        val availableAwb = chars.get(CameraCharacteristics.CONTROL_AWB_AVAILABLE_MODES) ?: intArrayOf()
+        val supportedAwb = com.example.model.ProWhitebalanceMode.values().filter { mode ->
+            mode == com.example.model.ProWhitebalanceMode.AUTO || availableAwb.contains(mode.camera2Mode)
+        }
+
+        return com.example.model.ProCameraCapabilities(
+            isProSupported = true,
+            minIso = minIso,
+            maxIso = maxIso,
+            supportedIsos = isoSteps.distinct(),
+            minShutterNanos = minShutter,
+            maxShutterNanos = maxShutter,
+            minFocusDistance = 0f,
+            maxFocusDistance = maxFocusDist,
+            isManualFocusSupported = isManualFocusSupported,
+            minEv = aeRange?.lower ?: -4,
+            maxEv = aeRange?.upper ?: 4,
+            evStep = aeStep,
+            supportedAwbModes = if (supportedAwb.isNotEmpty()) supportedAwb else com.example.model.ProWhitebalanceMode.values().toList()
         )
     }
 

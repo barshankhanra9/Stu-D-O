@@ -65,4 +65,5 @@
     <string name="pro_assist_zebra_title">ZEBRA EXPOSURE WARNING</string>
     <string name="pro_assist_zebra_threshold">THRESHOLD (IRE)</string>
     <string name="pro_assist_overlay_cd">Pro visual assist overlay</string>
+    <string name="pro_focus_fixed_lens">Fixed focus on this lens</string>
 </resources>

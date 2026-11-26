@@ -39,6 +39,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
@@ -277,6 +278,7 @@ fun ProControlsBar(
                     }
 
                     ProControlTab.FOCUS -> {
+                        val isManualFocusSupported = proCaps.isManualFocusSupported
                         Column(modifier = Modifier.fillMaxWidth()) {
                             Row(
                                 modifier = Modifier.fillMaxWidth(),
@@ -286,16 +288,27 @@ fun ProControlsBar(
                                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                                     ProValuePill(
                                         label = "AUTO (AF)",
-                                        isSelected = !proSettings.isManualFocus,
-                                        onClick = { onFocusChanged(null, false) }
+                                        isSelected = !proSettings.isManualFocus || !isManualFocusSupported,
+                                        onClick = { onFocusChanged(null, false) },
+                                        modifier = Modifier.testTag("pro_focus_af_pill")
                                     )
                                     ProValuePill(
                                         label = "MANUAL (MF)",
-                                        isSelected = proSettings.isManualFocus,
-                                        onClick = { onFocusChanged(proSettings.focusDistance ?: 2.0f, true) }
+                                        isSelected = proSettings.isManualFocus && isManualFocusSupported,
+                                        enabled = isManualFocusSupported,
+                                        onClick = { onFocusChanged(proSettings.focusDistance ?: 2.0f, true) },
+                                        modifier = Modifier.testTag("pro_focus_mf_pill")
                                     )
                                 }
-                                if (proSettings.isManualFocus) {
+                                if (!isManualFocusSupported) {
+                                    Text(
+                                        text = stringResource(R.string.pro_focus_fixed_lens),
+                                        color = StuDOSilverMuted,
+                                        fontSize = 10.sp,
+                                        fontWeight = FontWeight.Medium,
+                                        modifier = Modifier.testTag("pro_focus_fixed_hint")
+                                    )
+                                } else if (proSettings.isManualFocus) {
                                     val dist = proSettings.focusDistance ?: 0f
                                     val distText = if (dist <= 0.05f) "∞ Inf" else String.format(Locale.US, "%.1f m", 1.0f / dist)
                                     Text(
@@ -307,12 +320,12 @@ fun ProControlsBar(
                                 }
                             }
 
-                            if (proSettings.isManualFocus) {
+                            if (isManualFocusSupported && proSettings.isManualFocus) {
                                 Spacer(modifier = Modifier.height(6.dp))
                                 Slider(
-                                    value = (proSettings.focusDistance ?: 0f).coerceIn(0f, proCaps.maxFocusDistance),
+                                    value = (proSettings.focusDistance ?: 0f).coerceIn(0f, proCaps.maxFocusDistance.coerceAtLeast(0.01f)),
                                     onValueChange = { onFocusChanged(it, true) },
-                                    valueRange = 0f..proCaps.maxFocusDistance,
+                                    valueRange = 0f..proCaps.maxFocusDistance.coerceAtLeast(0.01f),
                                     colors = SliderDefaults.colors(
                                         thumbColor = StuDOFocusYellow,
                                         activeTrackColor = StuDOFocusYellow,
@@ -410,12 +423,16 @@ fun ProControlsBar(
                 )
 
                 // Focus Tab
-                val focusText = if (proSettings.isManualFocus) "MF" else "AF"
+                val focusText = when {
+                    !proCaps.isManualFocusSupported -> "FIXED"
+                    proSettings.isManualFocus -> "MF"
+                    else -> "AF"
+                }
                 ProTabButton(
                     title = "FOCUS",
                     value = focusText,
                     isActive = uiState.activeProTab == ProControlTab.FOCUS,
-                    isModified = proSettings.isManualFocus,
+                    isModified = proSettings.isManualFocus && proCaps.isManualFocusSupported,
                     onClick = {
                         val next = if (uiState.activeProTab == ProControlTab.FOCUS) ProControlTab.NONE else ProControlTab.FOCUS
                         onTabSelected(next)
@@ -918,26 +935,28 @@ private fun ProValuePill(
     label: String,
     isSelected: Boolean,
     onClick: () -> Unit,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    enabled: Boolean = true
 ) {
     Box(
         modifier = modifier
+            .alpha(if (enabled) 1f else 0.38f)
             .liquidGlassChipSurface(
                 shape = RoundedCornerShape(12.dp),
                 cornerRadius = 12.dp,
-                isActive = isSelected,
+                isActive = isSelected && enabled,
                 accentColor = StuDOFocusYellow,
                 activeFillAlpha = 0.24f
             )
-            .clickable { onClick() }
+            .clickable(enabled = enabled) { onClick() }
             .padding(horizontal = 10.dp, vertical = 6.dp),
         contentAlignment = Alignment.Center
     ) {
         Text(
             text = label,
-            color = if (isSelected) StuDOFocusYellow else StuDOWhite.copy(alpha = 0.92f),
+            color = if (isSelected && enabled) StuDOFocusYellow else StuDOWhite.copy(alpha = 0.92f),
             fontSize = 11.sp,
-            fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium
+            fontWeight = if (isSelected && enabled) FontWeight.Bold else FontWeight.Medium
         )
     }
 }

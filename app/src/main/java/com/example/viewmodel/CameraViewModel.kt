@@ -17,6 +17,7 @@ import androidx.camera.video.VideoRecordEvent
 import androidx.compose.ui.geometry.Offset
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.example.data.CameraSensorCapability
 import com.example.data.MediaCaptureManager
 import com.example.model.CameraFilter
 import com.example.util.VideoThumbnailUtil
@@ -117,6 +118,12 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
     private var liveCaptureFocalLengthMm: Float? = null
     @Volatile
     private var boundCameraCharacteristicFocalLengthMm: Float? = null
+    @Volatile
+    private var pendingHardwareZoomRatio: Float? = null
+    private var activeBoundHwMinZoom: Float = 1.0f
+    private var activeBoundHwMaxZoom: Float = 8.0f
+    private var primaryBackCameraId: String? = null
+    private var cachedRearCameraDescriptors: List<com.example.data.RearCameraHardwareDescriptor> = emptyList()
 
     private var focusResetJob: Job? = null
     private var recordingTimerJob: Job? = null
@@ -307,9 +314,11 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
         val hasFlash = camera.cameraInfo.hasFlashUnit()
 
         val zoomState = camera.cameraInfo.zoomState.value
-        val minZoom = zoomState?.minZoomRatio ?: 1.0f
-        val maxZoom = zoomState?.maxZoomRatio ?: 8.0f
-        val currentZoom = zoomState?.zoomRatio ?: 1.0f
+        val hwMinZoom = (zoomState?.minZoomRatio ?: 1.0f).takeIf { it.isFinite() && it > 0f } ?: 1.0f
+        val hwMaxZoom = (zoomState?.maxZoomRatio ?: 8.0f).takeIf { it.isFinite() && it >= hwMinZoom } ?: hwMinZoom
+        val hwCurrentZoom = (zoomState?.zoomRatio ?: 1.0f).takeIf { it.isFinite() } ?: 1.0f
+        activeBoundHwMinZoom = hwMinZoom
+        activeBoundHwMaxZoom = hwMaxZoom
 
         // Exposure compensation state
         val expState = camera.cameraInfo.exposureState
@@ -318,16 +327,89 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
         val expStep = expState.exposureCompensationStep.toFloat()
         val currentExpIndex = expState.exposureCompensationIndex
 
+        val boundCameraId = extractCameraId(camera.cameraInfo)
         boundCameraCharacteristicFocalLengthMm = extractCharacteristicFocalLengthMm(camera.cameraInfo)
+        val isFront = (_uiState.value.lensFacing == CameraSelector.LENS_FACING_FRONT)
+
+        var resolvedRearLenses = _uiState.value.availableRearLenses
+        var resolvedActiveRearCameraId = _uiState.value.activeRearCameraId
+        var resolvedActiveLensId = _uiState.value.activeLensId
+        var resolvedActiveLensType = _uiState.value.activeLensType
+        var resolvedMinDisplayZoom = hwMinZoom
+        var resolvedMaxDisplayZoom = hwMaxZoom
+        var resolvedDisplayZoom = hwCurrentZoom
+
+        if (!isFront) {
+            if (primaryBackCameraId == null && _uiState.value.activeRearCameraId == null && boundCameraId != null) {
+                primaryBackCameraId = boundCameraId
+            }
+            val camManager = appContext.getSystemService(Context.CAMERA_SERVICE) as? android.hardware.camera2.CameraManager
+            val inspected = com.example.data.MultiCameraLensManager.inspectRearCameras(
+                cameraProvider = cameraProvider,
+                primaryBackCameraInfo = if (boundCameraId == primaryBackCameraId) camera.cameraInfo else null,
+                cameraManager = camManager
+            )
+            if (inspected.isNotEmpty()) {
+                cachedRearCameraDescriptors = inspected
+            }
+            val discovery = com.example.data.MultiCameraLensManager.discoverRearLenses(
+                descriptors = cachedRearCameraDescriptors,
+                primaryCameraId = primaryBackCameraId ?: boundCameraId
+            )
+            resolvedRearLenses = discovery.lenses
+
+            val matchedLens = resolvedRearLenses.firstOrNull {
+                it.id == _uiState.value.activeLensId && (boundCameraId == null || it.cameraId == boundCameraId)
+            } ?: resolvedRearLenses.firstOrNull {
+                boundCameraId != null && it.cameraId == boundCameraId && it.lensType == com.example.model.HardwareLensType.MAIN
+            } ?: resolvedRearLenses.firstOrNull {
+                boundCameraId != null && it.cameraId == boundCameraId
+            } ?: resolvedRearLenses.firstOrNull {
+                it.lensType == com.example.model.HardwareLensType.MAIN
+            } ?: resolvedRearLenses.firstOrNull()
+
+            resolvedActiveRearCameraId = boundCameraId ?: matchedLens?.cameraId
+            resolvedActiveLensId = matchedLens?.id
+            resolvedActiveLensType = matchedLens?.lensType ?: com.example.model.HardwareLensType.MAIN
+
+            val pendingHw = pendingHardwareZoomRatio
+            pendingHardwareZoomRatio = null
+            val effectiveHwZoom = if (pendingHw != null) {
+                val targetHw = pendingHw.coerceIn(hwMinZoom, hwMaxZoom)
+                try {
+                    camera.cameraControl.setZoomRatio(targetHw)
+                } catch (_: Throwable) {}
+                targetHw
+            } else {
+                hwCurrentZoom
+            }
+
+            if (matchedLens != null) {
+                resolvedDisplayZoom = matchedLens.toDisplayZoom(effectiveHwZoom)
+                if (matchedLens.lensType == com.example.model.HardwareLensType.MACRO) {
+                    resolvedMinDisplayZoom = matchedLens.minDisplayZoom
+                    resolvedMaxDisplayZoom = matchedLens.maxDisplayZoom
+                } else {
+                    resolvedMinDisplayZoom = discovery.overallMinZoom
+                    resolvedMaxDisplayZoom = discovery.overallMaxZoom
+                }
+            }
+        } else {
+            pendingHardwareZoomRatio = null
+        }
 
         val updatedState = _uiState.updateAndGet {
             it.copy(
                 isCameraReady = true,
                 hasFrontCamera = hasFront,
                 hasBackCamera = hasBack,
-                minZoomRatio = minZoom,
-                maxZoomRatio = maxZoom,
-                zoomRatio = currentZoom,
+                minZoomRatio = resolvedMinDisplayZoom,
+                maxZoomRatio = resolvedMaxDisplayZoom,
+                zoomRatio = resolvedDisplayZoom.coerceIn(resolvedMinDisplayZoom, resolvedMaxDisplayZoom),
+                availableRearLenses = resolvedRearLenses,
+                activeRearCameraId = resolvedActiveRearCameraId,
+                activeLensId = resolvedActiveLensId,
+                activeLensType = resolvedActiveLensType,
                 isExposureSupported = isExpSupported,
                 minExposureIndex = expRange.lower,
                 maxExposureIndex = expRange.upper,
@@ -340,8 +422,11 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
                 }
             )
         }
-        val isFront = (updatedState.lensFacing == CameraSelector.LENS_FACING_FRONT)
-        applyBoundFlashCapabilities(isFrontLens = isFront, hasHardwareFlash = hasFlash, imageCapture = imageCapture)
+        applyBoundFlashCapabilities(
+            isFrontLens = (updatedState.lensFacing == CameraSelector.LENS_FACING_FRONT),
+            hasHardwareFlash = hasFlash,
+            imageCapture = imageCapture
+        )
         refreshLensCapabilities()
         if (_uiState.value.cameraMode == CameraMode.PRO) {
             applyProSettingsToPreview()
@@ -371,6 +456,15 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     @androidx.annotation.OptIn(androidx.camera.camera2.interop.ExperimentalCamera2Interop::class)
+    private fun extractCameraId(cameraInfo: CameraInfo): String? {
+        return try {
+            androidx.camera.camera2.interop.Camera2CameraInfo.from(cameraInfo).cameraId
+        } catch (_: Throwable) {
+            null
+        }
+    }
+
+    @androidx.annotation.OptIn(androidx.camera.camera2.interop.ExperimentalCamera2Interop::class)
     private fun extractCharacteristicFocalLengthMm(cameraInfo: CameraInfo): Float? {
         return try {
             val c2Info = androidx.camera.camera2.interop.Camera2CameraInfo.from(cameraInfo)
@@ -382,10 +476,19 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
         }
     }
 
+    private fun getActiveLensCapability(
+        isFront: Boolean = (_uiState.value.lensFacing == CameraSelector.LENS_FACING_FRONT)
+    ): CameraSensorCapability? {
+        return capabilityDetector.getCapabilityForLens(
+            isFrontCamera = isFront,
+            selectedBackCameraId = if (isFront) null else _uiState.value.activeRearCameraId
+        )
+    }
+
     fun refreshLensCapabilities() {
         try {
             val isFront = (_uiState.value.lensFacing == CameraSelector.LENS_FACING_FRONT)
-            val cap = capabilityDetector.getCapabilityForLens(isFront)
+            val cap = getActiveLensCapability(isFront)
             if (cap != null) {
                 val options = cap.getDynamicResolutionOptions()
                 val currentPref = _uiState.value.photoResolution
@@ -459,6 +562,12 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
                     com.example.model.PortraitDepthSource.AI_SEGMENTATION
                 }
 
+                val currentPro = _uiState.value.proSettings
+                val reconciledPro = com.example.data.MultiCameraLensManager.reconcileProSettings(
+                    currentSettings = currentPro,
+                    newCapabilities = cap.proCapabilities
+                )
+
                 _uiState.update {
                     it.copy(
                         isUhrSupportedOnCurrentLens = cap.isUltraHighResolutionSupported,
@@ -467,6 +576,7 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
                         isRawSupportedOnCurrentLens = cap.isRawSupported,
                         rawCaptureMode = effectiveRawMode,
                         proCapabilities = cap.proCapabilities,
+                        proSettings = reconciledPro,
                         standardSensorResolutionText = standardResText,
                         standardMaxResolutionSize = genuineMax,
                         availableResolutionOptions = options,
@@ -492,6 +602,9 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
                         isPortraitHardwareDepthSupported = isHwDepthSupported,
                         portraitDepthSource = effectiveDepthSource
                     )
+                }
+                if (reconciledPro != currentPro && _uiState.value.cameraMode == CameraMode.PRO) {
+                    applyProSettingsToPreview()
                 }
             } else {
                 val effectiveFocalMm = resolveEffectiveFocalLengthMm(null)
@@ -530,7 +643,7 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
         val isFront = (_uiState.value.lensFacing == CameraSelector.LENS_FACING_FRONT)
         val effectiveMm = reportedMm
             ?: boundCameraCharacteristicFocalLengthMm?.takeIf { it.isFinite() && it > 0f }
-            ?: capabilityDetector.getCapabilityForLens(isFront)?.primaryFocalLengthMm
+            ?: getActiveLensCapability(isFront)?.primaryFocalLengthMm
         val formatted = com.example.util.CameraMetadataUtil.formatFocalLengthMm(effectiveMm)
         _uiState.update { current ->
             if (current.activeFocalLengthMm == effectiveMm && current.activeFocalLengthText == formatted) {
@@ -616,7 +729,7 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
             val wasNight = (currentMode == CameraMode.NIGHT)
             val enteringNight = (mode == CameraMode.NIGHT)
             val isFront = (_uiState.value.lensFacing == CameraSelector.LENS_FACING_FRONT)
-            val cap = capabilityDetector.getCapabilityForLens(isFront)
+            val cap = getActiveLensCapability(isFront)
             val videoSupportedForLens = cap?.isVideoRecordingSupported ?: true
 
             if (wasPortrait && !enteringPortrait) {
@@ -752,6 +865,7 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
 
         if (nextFacing != currentFacing) {
             dismissScreenFlash()
+            pendingHardwareZoomRatio = null
             liveCaptureFocalLengthMm = null
             boundCameraCharacteristicFocalLengthMm = null
             _histogramBins.value = emptyList()
@@ -915,10 +1029,103 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
         _uiState.update { it.copy(userMessage = "Flash unavailable on this sensor") }
     }
 
+    fun selectLensPreset(lens: com.example.model.CameraLensOption) {
+        val state = _uiState.value
+        if (state.lensFacing != CameraSelector.LENS_FACING_BACK) return
+
+        val currentCamId = state.activeRearCameraId
+        val nonMacroLenses = state.availableRearLenses.filter {
+            it.lensType != com.example.model.HardwareLensType.MACRO
+        }
+        val overallMin = nonMacroLenses.minOfOrNull { it.minDisplayZoom } ?: state.minZoomRatio
+        val overallMax = nonMacroLenses.maxOfOrNull { it.maxDisplayZoom } ?: state.maxZoomRatio
+        val targetMinZoom = if (lens.lensType == com.example.model.HardwareLensType.MACRO) lens.minDisplayZoom else overallMin
+        val targetMaxZoom = if (lens.lensType == com.example.model.HardwareLensType.MACRO) lens.maxDisplayZoom else overallMax
+
+        if (currentCamId != null && currentCamId == lens.cameraId) {
+            val targetHw = lens.toHardwareZoom(lens.displayMagnification)
+                .coerceIn(activeBoundHwMinZoom, activeBoundHwMaxZoom)
+            activeCameraControl?.setZoomRatio(targetHw)
+            _uiState.update {
+                it.copy(
+                    zoomRatio = lens.displayMagnification.coerceIn(targetMinZoom, targetMaxZoom),
+                    minZoomRatio = targetMinZoom,
+                    maxZoomRatio = targetMaxZoom,
+                    activeLensId = lens.id,
+                    activeLensType = lens.lensType
+                )
+            }
+            return
+        }
+
+        if (state.isRecordingVideo) {
+            _uiState.update { it.copy(userMessage = "Cannot switch physical lens while recording") }
+            return
+        }
+
+        val targetHw = lens.toHardwareZoom(lens.displayMagnification)
+            .coerceIn(lens.hardwareMinZoom, lens.hardwareMaxZoom)
+        pendingHardwareZoomRatio = targetHw
+        liveCaptureFocalLengthMm = lens.focalLengthMm
+        boundCameraCharacteristicFocalLengthMm = lens.focalLengthMm
+
+        _uiState.update {
+            it.copy(
+                activeRearCameraId = lens.cameraId,
+                activeLensId = lens.id,
+                activeLensType = lens.lensType,
+                zoomRatio = lens.displayMagnification.coerceIn(targetMinZoom, targetMaxZoom),
+                minZoomRatio = targetMinZoom,
+                maxZoomRatio = targetMaxZoom,
+                isCameraReady = false
+            )
+        }
+        refreshLensCapabilities()
+    }
+
     fun setZoomRatio(ratio: Float) {
-        val clamped = ratio.coerceIn(_uiState.value.minZoomRatio, _uiState.value.maxZoomRatio)
-        activeCameraControl?.setZoomRatio(clamped)
-        _uiState.update { it.copy(zoomRatio = clamped) }
+        val state = _uiState.value
+        if (state.lensFacing == CameraSelector.LENS_FACING_FRONT || state.availableRearLenses.isEmpty()) {
+            val clamped = ratio.coerceIn(state.minZoomRatio, state.maxZoomRatio)
+            activeCameraControl?.setZoomRatio(clamped)
+            _uiState.update { it.copy(zoomRatio = clamped) }
+            return
+        }
+
+        val currentActive = state.availableRearLenses.firstOrNull { it.id == state.activeLensId }
+            ?: state.availableRearLenses.firstOrNull { it.cameraId == state.activeRearCameraId }
+        val decision = com.example.data.MultiCameraLensManager.resolveZoomTarget(
+            lenses = state.availableRearLenses,
+            currentActiveLens = currentActive,
+            targetDisplayZoom = ratio,
+            isRecordingVideo = state.isRecordingVideo
+        )
+
+        if (!decision.requiresCameraRebind) {
+            val safeHw = decision.hardwareZoomRatio.coerceIn(activeBoundHwMinZoom, activeBoundHwMaxZoom)
+            activeCameraControl?.setZoomRatio(safeHw)
+            _uiState.update {
+                it.copy(
+                    zoomRatio = decision.displayZoomRatio,
+                    activeLensId = decision.targetLens.id,
+                    activeLensType = decision.targetLens.lensType
+                )
+            }
+        } else {
+            pendingHardwareZoomRatio = decision.hardwareZoomRatio
+            liveCaptureFocalLengthMm = decision.targetLens.focalLengthMm
+            boundCameraCharacteristicFocalLengthMm = decision.targetLens.focalLengthMm
+            _uiState.update {
+                it.copy(
+                    activeRearCameraId = decision.targetLens.cameraId,
+                    activeLensId = decision.targetLens.id,
+                    activeLensType = decision.targetLens.lensType,
+                    zoomRatio = decision.displayZoomRatio,
+                    isCameraReady = false
+                )
+            }
+            refreshLensCapabilities()
+        }
     }
 
     fun onPinchZoom(scaleFactor: Float) {
@@ -1060,7 +1267,7 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
         val isProMode = _uiState.value.cameraMode == CameraMode.PRO
         val isProManual = isProMode && !_uiState.value.proSettings.isAuto
         val isFront = (_uiState.value.lensFacing == CameraSelector.LENS_FACING_FRONT)
-        val cap = capabilityDetector.getCapabilityForLens(isFront)
+        val cap = getActiveLensCapability(isFront)
 
         if (cap != null) {
             if ((isUhrRequested && _uiState.value.isUhrSupportedOnCurrentLens) ||
@@ -1161,7 +1368,7 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
                 onPhotoSaved = { uri, width, height, bytes ->
                     nightCaptureJob?.cancel()
                     dismissScreenFlash()
-                    val cap = capabilityDetector.getCapabilityForLens(isFront)
+                    val cap = getActiveLensCapability(isFront)
                     val actualSize = if (width > 0 && height > 0) {
                         android.util.Size(width, height)
                     } else {
@@ -1270,7 +1477,7 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
                 dismissScreenFlash()
                 val actualSize = android.util.Size(saveResult.width, saveResult.height)
                 val actualMp = (saveResult.width.toDouble() * saveResult.height.toDouble()) / 1_000_000.0
-                val cap = capabilityDetector.getCapabilityForLens(isFront)
+                val cap = getActiveLensCapability(isFront)
                 if (cap != null) {
                     capabilityDetector.recordResolutionCapture(
                         cameraId = cap.cameraId,
@@ -1547,7 +1754,7 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
         val isOemBokeh = isPortraitMode && isOemBokehExtensionActive
         val portraitBlur = _uiState.value.portraitBlurIntensity
         val portraitFocus = _uiState.value.portraitFocusPointNormalized
-        val portraitCap = if (isPortraitMode && !isOemBokeh) capabilityDetector.getCapabilityForLens(isFront) else null
+        val portraitCap = if (isPortraitMode && !isOemBokeh) getActiveLensCapability(isFront) else null
         val hwDepthProvider: (() -> com.example.portrait.HardwareDepthFrame?)? =
             if (isPortraitMode && !isOemBokeh && portraitCap != null && portraitCap.isDepthOutputSupported && portraitCap.depth16Sizes.isNotEmpty()) {
                 {
@@ -1618,7 +1825,7 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
             onPhotoSaved = { uri, width, height, bytes ->
                 dismissScreenFlash()
                 val isFrontLens = (_uiState.value.lensFacing == CameraSelector.LENS_FACING_FRONT)
-                val cap = capabilityDetector.getCapabilityForLens(isFrontLens)
+                val cap = getActiveLensCapability(isFrontLens)
                 val targetSize = _uiState.value.targetCaptureSize?.takeIf { it.width > 0 && it.height > 0 }
                 val actualSize = if (width > 0 && height > 0) android.util.Size(width, height) else (targetSize ?: _uiState.value.actualConfiguredResolution ?: android.util.Size(0, 0))
                 val isFallback = targetSize != null && actualSize.width > 0 && (targetSize.width != actualSize.width || targetSize.height != actualSize.height)
@@ -2937,7 +3144,7 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
     fun setVideoQuality(quality: VideoQualityOption) {
         preferencesRepo.saveVideoQuality(quality)
         val isFront = (_uiState.value.lensFacing == CameraSelector.LENS_FACING_FRONT)
-        val cap = capabilityDetector.getCapabilityForLens(isFront)
+        val cap = getActiveLensCapability(isFront)
         val validFps = cap?.getSupportedFpsForQuality(quality) ?: _uiState.value.supportedVideoFps
         val currentFps = _uiState.value.videoFps
         val effectiveFps = if (validFps.contains(currentFps)) currentFps else (validFps.firstOrNull() ?: VideoFpsOption.FPS_AUTO)
@@ -2955,7 +3162,7 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
 
     fun setVideoFps(fps: VideoFpsOption) {
         val isFront = (_uiState.value.lensFacing == CameraSelector.LENS_FACING_FRONT)
-        val cap = capabilityDetector.getCapabilityForLens(isFront)
+        val cap = getActiveLensCapability(isFront)
         if (cap != null) {
             val supported = cap.getSupportedFpsForQuality(_uiState.value.videoQuality)
             if (supported.isNotEmpty() && !supported.contains(fps)) return
@@ -3055,7 +3262,7 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
 
             // 2. Optical Image Stabilization (OIS)
             val isFront = (_uiState.value.lensFacing == CameraSelector.LENS_FACING_FRONT)
-            val cap = capabilityDetector.getCapabilityForLens(isFront)
+            val cap = getActiveLensCapability(isFront)
             if (cap?.isOisSupported == true) {
                 builder.setCaptureRequestOption(
                     android.hardware.camera2.CaptureRequest.LENS_OPTICAL_STABILIZATION_MODE,
@@ -3326,8 +3533,15 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     fun setProFocus(distance: Float?, isManual: Boolean) {
+        val proCaps = _uiState.value.proCapabilities
+        val effectiveManual = isManual && proCaps.isManualFocusSupported
+        val effectiveDist = if (effectiveManual) {
+            distance?.coerceIn(0f, proCaps.maxFocusDistance.coerceAtLeast(0.01f))
+        } else {
+            null
+        }
         _uiState.update { current ->
-            current.copy(proSettings = current.proSettings.copy(isManualFocus = isManual, focusDistance = distance))
+            current.copy(proSettings = current.proSettings.copy(isManualFocus = effectiveManual, focusDistance = effectiveDist))
         }
         applyProSettingsToPreview()
     }

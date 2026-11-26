@@ -955,6 +955,42 @@ data class ProCameraCapabilities(
     val supportedAwbModes: List<ProWhitebalanceMode> = ProWhitebalanceMode.values().toList()
 )
 
+enum class HardwareLensType(val displayName: String) {
+    ULTRA_WIDE("Ultra-Wide"),
+    MAIN("Wide"),
+    TELEPHOTO("Telephoto"),
+    MACRO("Macro")
+}
+
+@Immutable
+data class CameraLensOption(
+    val id: String,
+    val label: String,
+    val lensType: HardwareLensType,
+    val cameraId: String,
+    val displayMagnification: Float,
+    val hardwareMinZoom: Float = 1.0f,
+    val hardwareMaxZoom: Float = 8.0f,
+    val baseHardwareScale: Float = 1.0f,
+    val minDisplayZoom: Float = displayMagnification,
+    val maxDisplayZoom: Float = hardwareMaxZoom * baseHardwareScale,
+    val focalLengthMm: Float? = null,
+    val isSeparatePhysicalCamera: Boolean = false,
+    val isCropPreset: Boolean = false,
+    val isManualFocusSupported: Boolean = true,
+    val minimumFocusDistance: Float = 0f
+) {
+    fun toHardwareZoom(displayZoom: Float): Float {
+        val scale = if (baseHardwareScale > 0.001f) baseHardwareScale else 1.0f
+        return (displayZoom / scale).coerceIn(hardwareMinZoom, hardwareMaxZoom)
+    }
+
+    fun toDisplayZoom(hardwareZoom: Float): Float {
+        val scale = if (baseHardwareScale > 0.001f) baseHardwareScale else 1.0f
+        return (hardwareZoom * scale).coerceIn(minDisplayZoom, maxDisplayZoom)
+    }
+}
+
 @Immutable
 data class CameraUiState(
     val isCameraReady: Boolean = false,
@@ -978,6 +1014,10 @@ data class CameraUiState(
     val zoomRatio: Float = 1.0f,
     val minZoomRatio: Float = 1.0f,
     val maxZoomRatio: Float = 8.0f,
+    val availableRearLenses: List<CameraLensOption> = emptyList(),
+    val activeRearCameraId: String? = null,
+    val activeLensId: String? = null,
+    val activeLensType: HardwareLensType = HardwareLensType.MAIN,
     val isCapturing: Boolean = false,
     val isSavingMedia: Boolean = false,
     val inFlightCapturesCount: Int = 0,

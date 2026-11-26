@@ -535,6 +535,9 @@ fun CameraScreen(
             }
             val onToggleLens = remember(viewModel) { { viewModel.toggleLens() } }
             val onZoomChange = remember(viewModel) { { zoom: Float -> viewModel.setZoomRatio(zoom) } }
+            val onSelectLensPreset = remember(viewModel) {
+                { lens: com.example.model.CameraLensOption -> viewModel.selectLensPreset(lens) }
+            }
             val onThumbnailClick = remember(viewModel, mediaCaptureManager) { { uri: android.net.Uri -> viewModel.openGallery(mediaCaptureManager, uri) } }
             val onTogglePauseResume = remember(viewModel) { { viewModel.togglePauseResumeVideoRecording() } }
 
@@ -821,6 +824,7 @@ fun CameraScreen(
                     onThumbnailClick = onThumbnailClick,
                     onTogglePauseResume = onTogglePauseResume,
                     onToggleAudio = onToggleAudio,
+                    onSelectLensPreset = onSelectLensPreset,
                     modifier = Modifier.align(Alignment.BottomCenter)
                 )
 

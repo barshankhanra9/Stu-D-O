@@ -62,6 +62,8 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.example.model.CameraLensOption
+import com.example.model.HardwareLensType
 import com.example.ui.theme.GlassCoolBlueSpecular
 import com.example.ui.theme.GlassObsidianBottom
 import com.example.ui.theme.GlassWarmAmberSpecular
@@ -130,7 +132,11 @@ fun CurvedZoomControl(
     modifier: Modifier = Modifier,
     forceCompactPill: Boolean = false,
     idleCollapseDelayMs: Long = 3500L,
-    modeKey: Any? = null
+    modeKey: Any? = null,
+    lenses: List<CameraLensOption> = emptyList(),
+    activeLensId: String? = null,
+    activeLensType: HardwareLensType = HardwareLensType.MAIN,
+    onLensSelected: ((CameraLensOption) -> Unit)? = null
 ) {
     val haptic = rememberStuDOHaptic(hapticsEnabled)
     val canZoom = maxZoomRatio > minZoomRatio + 0.05f
@@ -276,8 +282,29 @@ fun CurvedZoomControl(
     ) {
         // 1. Dynamic Liquid Glass Zoom Pill (full preset strip or single compact zoom pill)
         if (pillAlpha > 0.02f) {
-            val presets = remember(minZoomRatio, maxZoomRatio) {
-                computeDynamicZoomPresets(minZoomRatio, maxZoomRatio)
+            val resolvedPresets = remember(lenses, minZoomRatio, maxZoomRatio) {
+                if (lenses.isNotEmpty()) {
+                    lenses
+                } else {
+                    computeDynamicZoomPresets(minZoomRatio, maxZoomRatio).map { ratio ->
+                        val lbl = when {
+                            ratio < 1.0f -> String.format(Locale.US, "%.1f", ratio)
+                            abs(ratio - ratio.roundToInt()) < 0.05f -> "${ratio.roundToInt()}"
+                            else -> String.format(Locale.US, "%.1f", ratio)
+                        }
+                        CameraLensOption(
+                            id = "preset_$lbl",
+                            label = lbl,
+                            lensType = when {
+                                ratio < 0.95f -> HardwareLensType.ULTRA_WIDE
+                                ratio >= 1.5f -> HardwareLensType.TELEPHOTO
+                                else -> HardwareLensType.MAIN
+                            },
+                            cameraId = "0",
+                            displayMagnification = ratio
+                        )
+                    }
+                }
             }
 
             Row(
@@ -328,8 +355,13 @@ fun CurvedZoomControl(
                             .padding(end = 4.dp)
                             .testTag("zoom_presets_row")
                     ) {
-                        presets.forEach { preset ->
-                            val isSelected = abs(zoomRatio - preset) < 0.15f
+                        resolvedPresets.forEach { lens ->
+                            val isSelected = if (activeLensId != null && lenses.isNotEmpty()) {
+                                lens.id == activeLensId
+                            } else {
+                                lens.lensType != HardwareLensType.MACRO &&
+                                    abs(zoomRatio - lens.displayMagnification) < 0.15f
+                            }
                             val beadScale by animateFloatAsState(
                                 targetValue = if (isSelected) 1f else 0.94f,
                                 animationSpec = spring(dampingRatio = 0.72f, stiffness = Spring.StiffnessMedium),
@@ -353,29 +385,29 @@ fun CurvedZoomControl(
                                 Modifier.clip(CircleShape)
                             }
 
-                            val label = when {
-                                preset < 1.0f -> String.format(Locale.US, "%.1f", preset)
-                                abs(preset - preset.roundToInt()) < 0.05f -> "${preset.roundToInt()}"
-                                else -> String.format(Locale.US, "%.1f", preset)
-                            }
-
                             Box(
                                 modifier = chipModifier
                                     .clickable(enabled = !isGestureArcActive && !isCompactPill) {
                                         if (!isSelected) haptic.tick()
                                         isPinnedArcActive = false
                                         interactionTick++
-                                        onZoomChange(preset)
+                                        if (lenses.isNotEmpty() && onLensSelected != null) {
+                                            onLensSelected(lens)
+                                        } else {
+                                            onZoomChange(lens.displayMagnification)
+                                        }
                                     }
                                     .padding(horizontal = 10.dp, vertical = 4.dp)
-                                    .testTag("zoom_preset_$label"),
+                                    .testTag("zoom_preset_${lens.label}"),
                                 contentAlignment = Alignment.Center
                             ) {
                                 Text(
-                                    text = label,
+                                    text = lens.label,
                                     color = if (isSelected) StuDOFocusYellow else StuDOSilver.copy(alpha = 0.78f),
                                     fontSize = 12.sp,
-                                    fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium
+                                    fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium,
+                                    maxLines = 1,
+                                    softWrap = false
                                 )
                             }
                         }
@@ -386,7 +418,7 @@ fun CurvedZoomControl(
                 // - In dense secondary panels (Portrait/Pro): only curved zoom works (tap or drag opens arc)
                 // - In Photo/Video idle-collapsed pill: tap wakes preset strip, drag/hold opens curved arc
                 // - In Photo/Video expanded strip: tap toggles curved arc, drag/hold opens curved arc
-                val readoutLabel = "${String.format(Locale.US, "%.1f", zoomRatio)}x"
+                val readoutLabel = formatActiveZoomReadout(zoomRatio, activeLensType)
                 val readoutModifier = if (isCompactPill) {
                     Modifier
                         .defaultMinSize(minWidth = 48.dp)
@@ -480,11 +512,16 @@ fun CurvedZoomControl(
                     .testTag("curved_zoom_arc"),
                 contentAlignment = Alignment.TopCenter
             ) {
+                val lensLandmarkZooms = remember(lenses) {
+                    lenses.filter { it.lensType != HardwareLensType.MACRO }.map { it.displayMagnification }
+                }
                 CurvedZoomArcCanvas(
                     zoomRatio = zoomRatio,
                     minZoomRatio = minZoomRatio,
                     maxZoomRatio = maxZoomRatio,
                     arcProgress = arcProgress,
+                    activeLensType = activeLensType,
+                    lensLandmarkZooms = lensLandmarkZooms,
                     onCollapse = {
                         isPinnedArcActive = false
                         interactionTick++
@@ -495,17 +532,27 @@ fun CurvedZoomControl(
     }
 }
 
+private fun formatActiveZoomReadout(zoomRatio: Float, activeLensType: HardwareLensType): String {
+    return if (activeLensType == HardwareLensType.MACRO) {
+        if (zoomRatio < 1.08f) "Macro" else "Macro ${String.format(Locale.US, "%.1f", zoomRatio)}x"
+    } else {
+        "${String.format(Locale.US, "%.1f", zoomRatio)}x"
+    }
+}
+
 @Composable
 private fun CurvedZoomArcCanvas(
     zoomRatio: Float,
     minZoomRatio: Float,
     maxZoomRatio: Float,
     arcProgress: Float,
+    activeLensType: HardwareLensType = HardwareLensType.MAIN,
+    lensLandmarkZooms: List<Float> = emptyList(),
     onCollapse: () -> Unit
 ) {
     val activeNorm = zoomToNormalized(zoomRatio, minZoomRatio, maxZoomRatio)
-    val landmarks = remember(minZoomRatio, maxZoomRatio) {
-        val candidates = listOf(0.5f, 0.6f, 1.0f, 1.5f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f, 8.0f, 10.0f)
+    val landmarks = remember(minZoomRatio, maxZoomRatio, lensLandmarkZooms) {
+        val candidates = (listOf(0.5f, 0.6f, 1.0f, 1.5f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f, 8.0f, 10.0f) + lensLandmarkZooms).distinct()
         val filtered = candidates.filter { it in (minZoomRatio + 0.05f)..(maxZoomRatio - 0.05f) }
         (listOf(minZoomRatio) + filtered + listOf(maxZoomRatio)).distinct()
     }
@@ -652,7 +699,7 @@ private fun CurvedZoomArcCanvas(
             contentAlignment = Alignment.Center
         ) {
             Text(
-                text = "${String.format(Locale.US, "%.1f", zoomRatio)}x",
+                text = formatActiveZoomReadout(zoomRatio, activeLensType),
                 color = StuDOWhite,
                 fontSize = 15.sp,
                 fontWeight = FontWeight.Bold,

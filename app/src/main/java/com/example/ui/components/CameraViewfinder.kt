@@ -115,6 +115,7 @@ import kotlin.coroutines.resumeWithException
 
 private data class CameraCoreBindingConfig(
     val lensFacing: Int,
+    val selectedCameraId: String? = null,
     val aspectRatio: CaptureAspectRatio,
     val isVideoMode: Boolean,
     val isPortraitMode: Boolean,
@@ -344,6 +345,9 @@ fun CameraViewfinder(
     var glPortraitViewInstance by remember { mutableStateOf<PortraitLiveBlurGLSurfaceView?>(null) }
     val session = remember { ViewfinderSessionHolder() }
     val shutterAlpha = remember { Animatable(0f) }
+    var lensSwitchSnapshot by remember { mutableStateOf<Bitmap?>(null) }
+    val lensSwitchCrossfadeAlpha = remember { Animatable(0f) }
+    var lastObservedCameraKey by remember { mutableStateOf<Pair<Int, String?>?>(null) }
 
     val latestUiState by rememberUpdatedState(uiState)
     val latestOnCameraBound by rememberUpdatedState(onCameraBound)
@@ -457,6 +461,53 @@ fun CameraViewfinder(
                 targetValue = 0f,
                 animationSpec = tween(durationMillis = 140)
             )
+        }
+    }
+
+    val currentCameraKey = Pair(
+        uiState.lensFacing,
+        if (uiState.lensFacing == CameraSelector.LENS_FACING_BACK) uiState.activeRearCameraId else null
+    )
+    LaunchedEffect(currentCameraKey) {
+        val prevKey = lastObservedCameraKey
+        lastObservedCameraKey = currentCameraKey
+        if (prevKey != null && prevKey != currentCameraKey) {
+            val capturedBmp = try {
+                val pv = previewViewInstance
+                var tv: android.view.TextureView? = null
+                if (pv != null) {
+                    for (i in 0 until pv.childCount) {
+                        val child = pv.getChildAt(i)
+                        if (child is android.view.TextureView) {
+                            tv = child
+                            break
+                        }
+                    }
+                }
+                if (tv != null && tv.isAvailable && tv.width > 0 && tv.height > 0) {
+                    tv.getBitmap(
+                        (tv.width / 3).coerceIn(120, 480),
+                        (tv.height / 3).coerceIn(120, 640)
+                    )
+                } else {
+                    null
+                }
+            } catch (_: Throwable) {
+                null
+            }
+            lensSwitchSnapshot = capturedBmp
+            lensSwitchCrossfadeAlpha.snapTo(1f)
+            // Hold crossfade until the new physical camera stream is ready or safety timeout expires
+            kotlinx.coroutines.withTimeoutOrNull(450L) {
+                while (!latestUiState.isCameraReady || !latestUiState.isStreaming) {
+                    kotlinx.coroutines.delay(16L)
+                }
+            }
+            lensSwitchCrossfadeAlpha.animateTo(
+                targetValue = 0f,
+                animationSpec = tween(durationMillis = 180, easing = FastOutSlowInEasing)
+            )
+            lensSwitchSnapshot = null
         }
     }
 
@@ -867,6 +918,29 @@ fun CameraViewfinder(
                     )
                 }
 
+                // Smooth physical lens-switch crossfade veil (prevents jarring black frame during CameraX rebind)
+                if (lensSwitchCrossfadeAlpha.value > 0.01f) {
+                    val snapBmp = lensSwitchSnapshot
+                    if (snapBmp != null && !snapBmp.isRecycled) {
+                        Image(
+                            bitmap = snapBmp.asImageBitmap(),
+                            contentDescription = null,
+                            contentScale = ContentScale.Crop,
+                            modifier = Modifier
+                                .fillMaxSize()
+                                .alpha(lensSwitchCrossfadeAlpha.value)
+                                .testTag("lens_switch_crossfade_overlay")
+                        )
+                    } else {
+                        Box(
+                            modifier = Modifier
+                                .fillMaxSize()
+                                .background(Color(0xFF0A0C12).copy(alpha = 0.72f * lensSwitchCrossfadeAlpha.value))
+                                .testTag("lens_switch_crossfade_overlay")
+                        )
+                    }
+                }
+
                 // Shutter feedback flash layer
                 if (shutterAlpha.value > 0f) {
                     Box(
@@ -937,6 +1011,7 @@ fun CameraViewfinder(
         val liveRequest = CameraBindingRequest(
             core = CameraCoreBindingConfig(
                 lensFacing = uiState.lensFacing,
+                selectedCameraId = if (uiState.lensFacing == CameraSelector.LENS_FACING_BACK) uiState.activeRearCameraId else null,
                 aspectRatio = activeAspectRatio,
                 isVideoMode = isVideoMode,
                 isPortraitMode = uiState.cameraMode == CameraMode.PORTRAIT,
@@ -1079,9 +1154,10 @@ fun CameraViewfinder(
                 awaitViewAttachedAndLaidOut(pv)
                 if (session.isDisposed.get()) return@LaunchedEffect
 
-                val selector = CameraSelector.Builder()
-                    .requireLensFacing(targetBindingRequest.core.lensFacing)
-                    .build()
+                val selector = buildTargetCameraSelector(
+                    lensFacing = targetBindingRequest.core.lensFacing,
+                    selectedCameraId = targetBindingRequest.core.selectedCameraId
+                )
 
                 // Configuration changed: tear down stale use cases cleanly before rebinding.
                 // Mandatory unbindAll() whenever switching into/out of Portrait Mode so ExtensionMode.BOKEH
@@ -1108,7 +1184,8 @@ fun CameraViewfinder(
                     prevConfig.core.isVideoMode == targetBindingRequest.core.isVideoMode &&
                     prevConfig.core.isPortraitMode == targetBindingRequest.core.isPortraitMode &&
                     prevConfig.core.isNightMode == targetBindingRequest.core.isNightMode &&
-                    prevConfig.core.lensFacing == targetBindingRequest.core.lensFacing
+                    prevConfig.core.lensFacing == targetBindingRequest.core.lensFacing &&
+                    prevConfig.core.selectedCameraId == targetBindingRequest.core.selectedCameraId
                 if (sameRebindSession) {
                     try {
                         cameraProvider.unbind(*staleUseCases.toTypedArray())
@@ -1129,6 +1206,7 @@ fun CameraViewfinder(
                 if (prevCamera != null &&
                     prevConfig != null &&
                     (prevConfig.core.lensFacing != targetBindingRequest.core.lensFacing ||
+                        prevConfig.core.selectedCameraId != targetBindingRequest.core.selectedCameraId ||
                         prevConfig.core.viewfinderRebindKey != targetBindingRequest.core.viewfinderRebindKey ||
                         prevConfig.core.isVideoMode != targetBindingRequest.core.isVideoMode ||
                         prevConfig.core.isPortraitMode != targetBindingRequest.core.isPortraitMode ||
@@ -1891,6 +1969,28 @@ fun CameraViewfinder(
             }
         }
     }
+}
+
+@androidx.annotation.OptIn(androidx.camera.camera2.interop.ExperimentalCamera2Interop::class)
+private fun buildTargetCameraSelector(
+    lensFacing: Int,
+    selectedCameraId: String?
+): CameraSelector {
+    val builder = CameraSelector.Builder()
+        .requireLensFacing(lensFacing)
+    if (lensFacing == CameraSelector.LENS_FACING_BACK && !selectedCameraId.isNullOrBlank()) {
+        builder.addCameraFilter { cameraInfos ->
+            val matched = cameraInfos.filter { info ->
+                try {
+                    androidx.camera.camera2.interop.Camera2CameraInfo.from(info).cameraId == selectedCameraId
+                } catch (_: Throwable) {
+                    false
+                }
+            }
+            matched.ifEmpty { cameraInfos }
+        }
+    }
+    return builder.build()
 }
 
 @androidx.annotation.OptIn(androidx.camera.camera2.interop.ExperimentalCamera2Interop::class)

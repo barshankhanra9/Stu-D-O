@@ -103,6 +103,7 @@ fun CameraBottomBar(
     onThumbnailClick: (Uri) -> Unit,
     onTogglePauseResume: (() -> Unit)? = null,
     onToggleAudio: (() -> Unit)? = null,
+    onSelectLensPreset: ((com.example.model.CameraLensOption) -> Unit)? = null,
     modifier: Modifier = Modifier
 ) {
     val haptic = rememberStuDOHaptic(uiState.isHapticFeedbackEnabled)
@@ -140,6 +141,7 @@ fun CameraBottomBar(
             // and auto-collapses after inactivity in Photo / Video modes.
             val isDenseSecondaryPanelOpen = uiState.cameraMode == CameraMode.PORTRAIT ||
                 uiState.cameraMode == CameraMode.PRO
+            val isBackCameraActive = uiState.lensFacing == androidx.camera.core.CameraSelector.LENS_FACING_BACK
             CurvedZoomControl(
                 zoomRatio = uiState.zoomRatio,
                 minZoomRatio = uiState.minZoomRatio,
@@ -147,7 +149,11 @@ fun CameraBottomBar(
                 hapticsEnabled = uiState.isHapticFeedbackEnabled,
                 onZoomChange = onZoomChange,
                 forceCompactPill = isDenseSecondaryPanelOpen,
-                modeKey = uiState.cameraMode
+                modeKey = uiState.cameraMode,
+                lenses = if (isBackCameraActive) uiState.availableRearLenses else emptyList(),
+                activeLensId = if (isBackCameraActive) uiState.activeLensId else null,
+                activeLensType = if (isBackCameraActive) uiState.activeLensType else com.example.model.HardwareLensType.MAIN,
+                onLensSelected = onSelectLensPreset
             )
 
             Spacer(modifier = Modifier.height(10.dp))
