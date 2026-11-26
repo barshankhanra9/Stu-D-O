@@ -23,17 +23,21 @@
 # Preserve CameraX classes and camera2 interop/extensions
 -keep class androidx.camera.** { *; }
 -keep interface androidx.camera.** { *; }
+-keep class androidx.camera.extensions.** { *; }
+-keep interface androidx.camera.extensions.** { *; }
 -keepclassmembers class * extends androidx.camera.core.impl.Config$Option { *; }
 
 # Preserve ML Kit segmentation & Play Services base
 -keep class com.google.mlkit.** { *; }
 -dontwarn com.google.mlkit.**
 
-# Preserve app UI, OEM adapters, portrait pipeline, and models
+# Preserve app UI, OEM adapters, portrait pipeline, night pipeline, and models
 -keep class com.example.model.** { *; }
 -keep class com.example.oem.** { *; }
 -keep class com.example.portrait.** { *; }
+-keep class com.example.night.** { *; }
 -keep class com.example.ui.** { *; }
 -keep class com.example.editor.** { *; }
 -keep class com.example.viewmodel.** { *; }
+
 

@@ -33,4 +33,9 @@ val GlassRecordingTintTop = Color(0xFF5A161A)
 val GlassRecordingTintBottom = Color(0xFF23090B)
 val GlassPausedTintTop = Color(0xFF4D3410)
 val GlassPausedTintBottom = Color(0xFF1E1407)
+val GlassNightMoonAccent = Color(0xFFA5B4FC) // Moonlit indigo-blue accent for Night Mode
+val GlassNightCyanGlow = Color(0xFF7DD3FC) // Luminous cyan-blue ring highlight during capture
+val GlassNightTintTop = Color(0xFF181E3E)
+val GlassNightTintBottom = Color(0xFF090C1C)
+
 

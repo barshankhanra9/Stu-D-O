@@ -70,6 +70,7 @@ import com.example.ui.components.CameraTopBar
 import com.example.ui.components.CameraViewfinder
 import com.example.ui.components.CountdownTimerOverlay
 import com.example.ui.components.LiveHistogramView
+import com.example.ui.components.NightControlsBar
 import com.example.ui.components.PermissionScreen
 import com.example.ui.components.PhotoPreviewDialog
 import com.example.ui.components.PortraitBlurEditorDialog
@@ -559,6 +560,16 @@ fun CameraScreen(
             val onPortraitOemExtensionChanged = remember(viewModel) {
                 { active: Boolean -> viewModel.onPortraitExtensionBindingChanged(active) }
             }
+            val onNightBindingChanged = remember(viewModel) {
+                { isExtensionActive: Boolean, estimatedLatencyMs: Long? ->
+                    viewModel.onNightBindingChanged(isExtensionActive, estimatedLatencyMs)
+                }
+            }
+            val onExposureTelemetry = remember(viewModel) {
+                { exposureNs: Long, iso: Int ->
+                    viewModel.onExposureTelemetry(exposureNs, iso)
+                }
+            }
 
             // Live Viewfinder (CameraX Preview + Gestures + Framing Grid + Level + Filters + Portrait Live Bokeh)
             CameraViewfinder(
@@ -582,7 +593,10 @@ fun CameraScreen(
                 onPortraitStatusUpdate = onPortraitStatusUpdate,
                 onNormalizedFocusPoint = onNormalizedFocusPoint,
                 portraitPipelineManager = viewModel.portraitPipelineManager,
-                onPortraitOemExtensionChanged = onPortraitOemExtensionChanged
+                onPortraitOemExtensionChanged = onPortraitOemExtensionChanged,
+                nightPipelineManager = viewModel.nightPipelineManager,
+                onNightBindingChanged = onNightBindingChanged,
+                onExposureTelemetry = onExposureTelemetry
             )
 
             val isFullScreenModalOpen = uiState.isSettingsOpen ||
@@ -720,6 +734,25 @@ fun CameraScreen(
                             .align(Alignment.TopEnd)
                             .statusBarsPadding()
                             .padding(top = 68.dp, end = 16.dp)
+                    )
+                }
+
+                // Night Mode Top Viewfinder Liquid Glass Status & Auto/Max Pill
+                AnimatedVisibility(
+                    visible = uiState.cameraMode == CameraMode.NIGHT &&
+                        !uiState.isQuickSettingsOpen &&
+                        !uiState.isFilterSelectorOpen &&
+                        !uiState.isSettingsOpen,
+                    enter = slideInVertically { -it / 2 } + fadeIn(),
+                    exit = slideOutVertically { -it / 2 } + fadeOut(),
+                    modifier = Modifier
+                        .align(Alignment.TopCenter)
+                        .statusBarsPadding()
+                        .padding(top = 64.dp, start = 14.dp, end = 14.dp)
+                ) {
+                    NightControlsBar(
+                        uiState = uiState,
+                        onSelectExposureMode = { viewModel.setNightExposureMode(it) }
                     )
                 }
 

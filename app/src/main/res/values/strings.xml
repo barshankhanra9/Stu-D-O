@@ -34,4 +34,15 @@
     <string name="portrait_tier_subject_ai">Subject AI</string>
     <string name="portrait_tier_selfie_offline">Offline AI</string>
     <string name="portrait_model_downloading">Preparing Subject AI %1$d%%</string>
+    <string name="mode_night">NIGHT</string>
+    <string name="night_mode_title">Night Mode</string>
+    <string name="night_exposure_auto">Auto</string>
+    <string name="night_exposure_max">Max</string>
+    <string name="night_hold_steady">Hold steady…</string>
+    <string name="night_processing">Enhancing low light…</string>
+    <string name="night_engine_hw">OEM</string>
+    <string name="night_engine_stack">%1$dF</string>
+    <string name="night_status_pill_cd">Night Mode, estimated capture %1$s</string>
+    <string name="night_auto_cd">Auto exposure duration</string>
+    <string name="night_max_cd">Max exposure duration</string>
 </resources>

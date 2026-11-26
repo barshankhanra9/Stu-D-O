@@ -282,8 +282,8 @@ fun CameraTopBar(
                     }
                 }
 
-                val isPortraitMode = uiState.cameraMode == CameraMode.PORTRAIT
-                if (!isPortraitMode && uiState.photoResolution == PhotoResolution.ULTRA_RES) {
+                val isPortraitOrNight = uiState.cameraMode == CameraMode.PORTRAIT || uiState.cameraMode == CameraMode.NIGHT
+                if (!isPortraitOrNight && uiState.photoResolution == PhotoResolution.ULTRA_RES) {
                     val uhrText = if (uiState.uhrMegapixels > 0.0) {
                         "UHR ${String.format(Locale.US, "%.0f", uiState.uhrMegapixels)}MP"
                     } else {
@@ -309,10 +309,10 @@ fun CameraTopBar(
                     }
                 }
 
-                // In PRO mode or when RAW is active (excluding Portrait mode, which only captures JPEG),
+                // In PRO mode or when RAW is active (excluding Portrait & Night modes, which only capture JPEG),
                 // show interactive RAW / JPEG format selector
                 val isPro = uiState.cameraMode == CameraMode.PRO
-                if (!isPortraitMode && (isPro || uiState.rawCaptureMode != RawCaptureMode.OFF)) {
+                if (!isPortraitOrNight && (isPro || uiState.rawCaptureMode != RawCaptureMode.OFF)) {
                     val rawLabel = when (uiState.rawCaptureMode) {
                         RawCaptureMode.OFF -> "JPEG"
                         RawCaptureMode.DNG_ONLY -> "RAW"
@@ -351,7 +351,7 @@ fun CameraTopBar(
                     }
                 }
 
-                if (!isPortraitMode && uiState.isHdrEnabled) {
+                if (!isPortraitOrNight && uiState.isHdrEnabled) {
                     Box(
                         modifier = Modifier
                             .liquidGlassChipSurface(

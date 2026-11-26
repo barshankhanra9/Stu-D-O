@@ -99,6 +99,7 @@ import com.example.model.ScreenFlashMode
 import com.example.model.VideoCodecOption
 import com.example.model.VideoFpsOption
 import com.example.model.VideoQualityOption
+import com.example.night.NightPipelineManager
 import com.example.portrait.PortraitLiveBlurGLSurfaceView
 import com.example.portrait.PortraitPipelineManager
 import kotlinx.coroutines.CancellationException
@@ -116,6 +117,7 @@ private data class CameraCoreBindingConfig(
     val aspectRatio: CaptureAspectRatio,
     val isVideoMode: Boolean,
     val isPortraitMode: Boolean,
+    val isNightMode: Boolean = false,
     val capturePriority: CapturePriority?,
     val videoQuality: VideoQualityOption?,
     val videoFps: VideoFpsOption?,
@@ -320,6 +322,9 @@ fun CameraViewfinder(
     onNormalizedFocusPoint: ((Float, Float) -> Unit)? = null,
     portraitPipelineManager: PortraitPipelineManager? = null,
     onPortraitOemExtensionChanged: (Boolean) -> Unit = {},
+    nightPipelineManager: NightPipelineManager? = null,
+    onNightBindingChanged: (Boolean, Long?) -> Unit = { _, _ -> },
+    onExposureTelemetry: ((Long, Int) -> Unit)? = null,
     orientationState: kotlinx.coroutines.flow.StateFlow<com.example.model.DeviceOrientationState>? = null,
     modifier: Modifier = Modifier
 ) {
@@ -347,6 +352,9 @@ fun CameraViewfinder(
     val latestOnNormalizedFocusPoint by rememberUpdatedState(onNormalizedFocusPoint)
     val latestPortraitPipelineManager by rememberUpdatedState(portraitPipelineManager)
     val latestOnPortraitOemExtensionChanged by rememberUpdatedState(onPortraitOemExtensionChanged)
+    val latestNightPipelineManager by rememberUpdatedState(nightPipelineManager)
+    val latestOnNightBindingChanged by rememberUpdatedState(onNightBindingChanged)
+    val latestOnExposureTelemetry by rememberUpdatedState(onExposureTelemetry)
 
     val isOverlayBlocking = uiState.isSettingsOpen ||
         uiState.isWatermarkStudioOpen ||
@@ -892,6 +900,7 @@ fun CameraViewfinder(
                 aspectRatio = activeAspectRatio,
                 isVideoMode = isVideoMode,
                 isPortraitMode = uiState.cameraMode == CameraMode.PORTRAIT,
+                isNightMode = uiState.cameraMode == CameraMode.NIGHT,
                 capturePriority = if (!isVideoMode) uiState.capturePriority else null,
                 videoQuality = if (isVideoMode) uiState.videoQuality else null,
                 videoFps = if (isVideoMode) uiState.videoFps else null,
@@ -961,6 +970,7 @@ fun CameraViewfinder(
                 glPortraitViewInstance = null
                 latestPortraitPipelineManager?.onExitPortraitMode()
                 latestOnPortraitOemExtensionChanged(false)
+                latestOnNightBindingChanged(false, null)
                 try {
                     orientationEventListener.disable()
                 } catch (_: Throwable) {}
@@ -1056,6 +1066,7 @@ fun CameraViewfinder(
                     prevConfig?.core?.viewfinderRebindKey == targetBindingRequest.core.viewfinderRebindKey &&
                     prevConfig.core.isVideoMode == targetBindingRequest.core.isVideoMode &&
                     prevConfig.core.isPortraitMode == targetBindingRequest.core.isPortraitMode &&
+                    prevConfig.core.isNightMode == targetBindingRequest.core.isNightMode &&
                     prevConfig.core.lensFacing == targetBindingRequest.core.lensFacing
                 if (sameRebindSession) {
                     try {
@@ -1079,7 +1090,8 @@ fun CameraViewfinder(
                     (prevConfig.core.lensFacing != targetBindingRequest.core.lensFacing ||
                         prevConfig.core.viewfinderRebindKey != targetBindingRequest.core.viewfinderRebindKey ||
                         prevConfig.core.isVideoMode != targetBindingRequest.core.isVideoMode ||
-                        prevConfig.core.isPortraitMode != targetBindingRequest.core.isPortraitMode)
+                        prevConfig.core.isPortraitMode != targetBindingRequest.core.isPortraitMode ||
+                        prevConfig.core.isNightMode != targetBindingRequest.core.isNightMode)
                 ) {
                     awaitCameraClosed(prevCamera)
                     if (session.isDisposed.get()) return@LaunchedEffect
@@ -1120,6 +1132,11 @@ fun CameraViewfinder(
                         onLowLightChanged = { isLowLight ->
                             if (!session.isDisposed.get()) {
                                 latestOnLowLightChanged(isLowLight)
+                            }
+                        },
+                        onExposureTelemetry = { exposureNs, iso ->
+                            if (!session.isDisposed.get()) {
+                                latestOnExposureTelemetry?.invoke(exposureNs, iso)
                             }
                         }
                     )
@@ -1324,8 +1341,99 @@ fun CameraViewfinder(
                                     bound
                                 }
                             }
+                        } else if (targetBindingRequest.core.isNightMode) {
+                            latestOnPortraitOemExtensionChanged(false)
+                            val activeNightMgr = latestNightPipelineManager
+                            val nightCap = activeNightMgr?.resolveNightBinding(
+                                cameraProvider = cameraProvider,
+                                baseSelector = selector,
+                                mainExecutor = mainExecutor
+                            )
+                            var nightExtensionCamera: androidx.camera.core.Camera? = null
+                            if (nightCap != null && nightCap.isExtensionSupported) {
+                                try {
+                                    // CameraX Night Extension requires Preview + ImageCapture only (never ImageAnalysis)
+                                    val nightExtPreview = Preview.Builder()
+                                        .setResolutionSelector(defaultAspectResolutionSelector)
+                                        .setTargetRotation(displayRotation)
+                                        .build()
+                                    val boundNightCam = cameraProvider.bindToLifecycle(
+                                        lifecycleOwner,
+                                        nightCap.effectiveSelector,
+                                        nightExtPreview,
+                                        imageCapture
+                                    )
+                                    attachBoundPreview(nightExtPreview)
+                                    session.boundImageCapture = imageCapture
+                                    latestOnNightBindingChanged(true, nightCap.estimatedLatencyMs)
+                                    nightExtensionCamera = boundNightCam
+                                } catch (extErr: Throwable) {
+                                    android.util.Log.w(
+                                        "CameraViewfinder",
+                                        "ExtensionMode.NIGHT bind failed, falling back to Multi-Frame Stack: ${extErr.message}"
+                                    )
+                                    latestOnNightBindingChanged(false, null)
+                                    try {
+                                        cameraProvider.unbindAll()
+                                    } catch (_: Throwable) {}
+                                }
+                            }
+                            if (nightExtensionCamera != null) {
+                                nightExtensionCamera
+                            } else {
+                                latestOnNightBindingChanged(false, null)
+                                if (targetBindingRequest.isAnalysisNeeded) {
+                                    val (analysis, exec) = buildCombinedImageAnalysis(
+                                        mainExecutor = mainExecutor,
+                                        session = session,
+                                        aspectRatio = targetBindingRequest.core.aspectRatio,
+                                        onHistogramData = { bins -> latestOnHistogramData(bins) },
+                                        onBackdropBitmap = { bmp -> blurredBackdropBitmap = bmp }
+                                    )
+                                    session.analysisExecutor = exec
+                                    session.boundImageAnalysis = analysis
+                                    try {
+                                        val nightPreview = buildPreviewUseCase()
+                                        val bound = cameraProvider.bindToLifecycle(
+                                            lifecycleOwner,
+                                            selector,
+                                            nightPreview,
+                                            imageCapture,
+                                            analysis
+                                        )
+                                        attachBoundPreview(nightPreview)
+                                        session.boundImageCapture = imageCapture
+                                        bound
+                                    } catch (e: Throwable) {
+                                        session.clearAnalysis()
+                                        try { cameraProvider.unbindAll() } catch (_: Throwable) {}
+                                        val nightTwoPreview = buildPreviewUseCase()
+                                        val bound = cameraProvider.bindToLifecycle(
+                                            lifecycleOwner,
+                                            selector,
+                                            nightTwoPreview,
+                                            imageCapture
+                                        )
+                                        attachBoundPreview(nightTwoPreview)
+                                        session.boundImageCapture = imageCapture
+                                        bound
+                                    }
+                                } else {
+                                    val nightPreview = buildPreviewUseCase()
+                                    val bound = cameraProvider.bindToLifecycle(
+                                        lifecycleOwner,
+                                        selector,
+                                        nightPreview,
+                                        imageCapture
+                                    )
+                                    attachBoundPreview(nightPreview)
+                                    session.boundImageCapture = imageCapture
+                                    bound
+                                }
+                            }
                         } else if (targetBindingRequest.isAnalysisNeeded) {
                             latestOnPortraitOemExtensionChanged(false)
+                            latestOnNightBindingChanged(false, null)
                             val (analysis, exec) = buildCombinedImageAnalysis(
                                 mainExecutor = mainExecutor,
                                 session = session,
@@ -1371,6 +1479,7 @@ fun CameraViewfinder(
                             }
                         } else {
                             latestOnPortraitOemExtensionChanged(false)
+                            latestOnNightBindingChanged(false, null)
                             val stillPreview = buildPreviewUseCase()
                             val bound = cameraProvider.bindToLifecycle(
                                 lifecycleOwner,
@@ -1744,7 +1853,8 @@ private fun attachActiveLensCaptureCallback(
     mainExecutor: java.util.concurrent.Executor,
     session: ViewfinderSessionHolder,
     onFocalChanged: (Float?, String?) -> Unit,
-    onLowLightChanged: (Boolean) -> Unit
+    onLowLightChanged: (Boolean) -> Unit,
+    onExposureTelemetry: ((Long, Int) -> Unit)? = null
 ) {
     var hasReportedInitial = false
     var lastFocalMm: Float? = null
@@ -1752,6 +1862,7 @@ private fun attachActiveLensCaptureCallback(
     var hasReportedLowLight = false
     var lastLowLight = false
     var pendingLowLightStreak = 0
+    var lastTelemetryReportNs = 0L
 
     androidx.camera.camera2.interop.Camera2Interop.Extender(previewBuilder)
         .setSessionCaptureCallback(
@@ -1780,11 +1891,20 @@ private fun attachActiveLensCaptureCallback(
                         }
                     }
 
-                    // Evaluate AE state & exposure telemetry for Screen Flash Auto mode when screen flash isn't currently illuminating
+                    // Evaluate AE state & exposure telemetry for Screen Flash Auto & Night duration estimate
                     if (!session.isScreenFlashOverlayActive.get()) {
                         val aeState = result.get(android.hardware.camera2.CaptureResult.CONTROL_AE_STATE)
                         val exposureNs = result.get(android.hardware.camera2.CaptureResult.SENSOR_EXPOSURE_TIME) ?: 0L
                         val iso = result.get(android.hardware.camera2.CaptureResult.SENSOR_SENSITIVITY) ?: 0
+                        val nowNs = System.nanoTime()
+                        if (onExposureTelemetry != null && (exposureNs > 0L || iso > 0) &&
+                            (nowNs - lastTelemetryReportNs >= 750_000_000L)
+                        ) {
+                            lastTelemetryReportNs = nowNs
+                            mainExecutor.execute {
+                                onExposureTelemetry(exposureNs, iso)
+                            }
+                        }
                         val frameLowLight = aeState == android.hardware.camera2.CaptureResult.CONTROL_AE_STATE_FLASH_REQUIRED ||
                             (exposureNs >= 33_000_000L && iso >= 600) ||
                             exposureNs >= 55_000_000L

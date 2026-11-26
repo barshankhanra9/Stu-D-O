@@ -62,6 +62,7 @@ class CameraPreferencesRepository(context: Context) {
         private const val KEY_SELFIE_MIRROR = "pref_selfie_mirror"
         private const val KEY_SAVE_LOCATION = "pref_save_location"
         private const val KEY_PORTRAIT_BLUR_INTENSITY = "pref_portrait_blur_intensity"
+        private const val KEY_NIGHT_EXPOSURE_MODE = "pref_night_exposure_mode"
 
         fun watermarkConfigToJson(config: WatermarkConfig): JSONObject {
             return JSONObject().apply {
@@ -613,5 +614,19 @@ class CameraPreferencesRepository(context: Context) {
 
     fun savePortraitBlurIntensity(intensity: Float) {
         prefs.edit().putFloat(KEY_PORTRAIT_BLUR_INTENSITY, intensity.coerceIn(0f, 1f)).apply()
+    }
+
+    // Night Mode Exposure Duration (Auto vs Max)
+    fun getNightExposureMode(): com.example.model.NightExposureMode {
+        val name = prefs.getString(KEY_NIGHT_EXPOSURE_MODE, com.example.model.NightExposureMode.AUTO.name)
+        return try {
+            com.example.model.NightExposureMode.valueOf(name ?: com.example.model.NightExposureMode.AUTO.name)
+        } catch (_: Exception) {
+            com.example.model.NightExposureMode.AUTO
+        }
+    }
+
+    fun saveNightExposureMode(mode: com.example.model.NightExposureMode) {
+        prefs.edit().putString(KEY_NIGHT_EXPOSURE_MODE, mode.name).apply()
     }
 }

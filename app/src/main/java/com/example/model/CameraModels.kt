@@ -12,8 +12,23 @@ import androidx.compose.ui.graphics.Color
 enum class CameraMode(val displayName: String) {
     PHOTO("PHOTO"),
     PORTRAIT("PORTRAIT"),
+    NIGHT("NIGHT"),
     PRO("PRO"),
     VIDEO("VIDEO")
+}
+
+enum class NightExposureMode(
+    val displayName: String,
+    val burstFrameCount: Int,
+    val baseDurationSeconds: Float
+) {
+    AUTO("Auto", 4, 2.0f),
+    MAX("Max", 6, 3.5f)
+}
+
+enum class NightCaptureEngine(val displayName: String, val shortBadge: String) {
+    HARDWARE_EXTENSION("OEM Night", "OEM"),
+    MULTI_FRAME_STACK("Multi-Frame Stack", "STACK")
 }
 
 enum class PortraitDepthSource(val displayName: String, val badgeLabel: String) {
@@ -1028,7 +1043,15 @@ data class CameraUiState(
     val postCapturePortraitTarget: PostCapturePortraitTarget? = null,
     val isPortraitEditorOpen: Boolean = false,
     val isPortraitEditorSaving: Boolean = false,
-    val portraitSidecarRevision: Long = 0L
+    val portraitSidecarRevision: Long = 0L,
+    // Dedicated Night Mode State
+    val nightExposureMode: NightExposureMode = NightExposureMode.AUTO,
+    val isNightExtensionSupported: Boolean = false,
+    val nightCaptureEngine: NightCaptureEngine = NightCaptureEngine.MULTI_FRAME_STACK,
+    val nightEstimatedDurationSeconds: Float = 2.0f,
+    val isNightCapturing: Boolean = false,
+    val nightCaptureProgress: Float = 0f,
+    val nightCaptureStatusText: String = ""
 ) {
     val effectiveTimerSeconds: Int
         get() = selectedTimer.effectiveSeconds(customTimerSeconds)
@@ -1038,6 +1061,17 @@ data class CameraUiState(
             CaptureTimer.formatDuration(customTimerSeconds)
         } else {
             selectedTimer.displayName
+        }
+
+    val nightDurationBadgeText: String
+        get() {
+            val sec = nightEstimatedDurationSeconds.coerceIn(1.0f, 8.0f)
+            val roundedHalf = kotlin.math.round(sec * 2f) / 2f
+            return if (kotlin.math.abs(roundedHalf - kotlin.math.round(roundedHalf)) < 0.05f) {
+                "~${kotlin.math.round(roundedHalf).toInt()}s"
+            } else {
+                String.format(java.util.Locale.US, "~%.1fs", roundedHalf)
+            }
         }
 }
 

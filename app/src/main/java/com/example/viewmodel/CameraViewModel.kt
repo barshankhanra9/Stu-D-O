@@ -79,8 +79,15 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
     private val ultraResCaptureManager = com.example.data.UltraResCaptureManager(appContext)
     private val oemRegistry = com.example.oem.OemAdapterRegistry()
     val portraitPipelineManager = com.example.portrait.PortraitPipelineManager(appContext)
+    val nightPipelineManager = com.example.night.NightPipelineManager(appContext)
     @Volatile
     private var isOemBokehExtensionActive = false
+    @Volatile
+    private var nightExtensionLatencyMs: Long? = null
+    @Volatile
+    private var lastExposureTimeNs: Long = 0L
+    @Volatile
+    private var lastIso: Int = 0
 
     private val _uiState = MutableStateFlow(CameraUiState())
     val uiState: StateFlow<CameraUiState> = _uiState.asStateFlow()
@@ -110,6 +117,7 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
     private var countdownJob: Job? = null
     private var galleryRefreshJob: Job? = null
     private var screenFlashTimeoutJob: Job? = null
+    private var nightCaptureJob: Job? = null
     private val pendingScreenFlashListener = java.util.concurrent.atomic.AtomicReference<ImageCapture.ScreenFlashListener?>(null)
     private var mediaSound: MediaActionSound? = null
     private var developerTapCount = 0
@@ -138,6 +146,16 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
         } else {
             com.example.model.PortraitQualityTier.BALANCED
         }
+
+        val savedNightMode = preferencesRepo.getNightExposureMode()
+        val initialNightDuration = nightPipelineManager.estimateCaptureDurationSeconds(
+            exposureMode = savedNightMode,
+            isExtensionSupported = false,
+            extensionLatencyMs = null,
+            isLowLightDetected = false,
+            lastExposureNs = 0L,
+            lastIso = 0
+        )
 
         // Restore all persistent user settings from disk
         _uiState.update { current ->
@@ -177,7 +195,9 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
                 activeOemAdapterName = activeOemAdapter.adapterName,
                 oemEnhancementSummary = "${activeOemAdapter.adapterName} (${if (savedOemMode == com.example.model.OemEnhancementMode.AUTOMATIC) "Auto" else "Universal"})",
                 portraitBlurIntensity = preferencesRepo.getPortraitBlurIntensity(),
-                portraitQualityTier = initialPortraitTier
+                portraitQualityTier = initialPortraitTier,
+                nightExposureMode = savedNightMode,
+                nightEstimatedDurationSeconds = initialNightDuration
             )
         }
         refreshLensCapabilities()
@@ -574,6 +594,7 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     fun setCameraMode(mode: CameraMode) {
+        if (_uiState.value.isNightCapturing) return
         val currentMode = _uiState.value.cameraMode
         if (currentMode != mode) {
             dismissScreenFlash()
@@ -582,6 +603,8 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
             }
             val wasPortrait = (currentMode == CameraMode.PORTRAIT)
             val enteringPortrait = (mode == CameraMode.PORTRAIT)
+            val wasNight = (currentMode == CameraMode.NIGHT)
+            val enteringNight = (mode == CameraMode.NIGHT)
             val isFront = (_uiState.value.lensFacing == CameraSelector.LENS_FACING_FRONT)
             val cap = capabilityDetector.getCapabilityForLens(isFront)
             val videoSupportedForLens = cap?.isVideoRecordingSupported ?: true
@@ -593,13 +616,17 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
                 isOemBokehExtensionActive = false
                 portraitPipelineManager.onEnterPortraitMode()
             }
+            if (!enteringNight) {
+                nightExtensionLatencyMs = null
+            }
 
             val updatedState = _uiState.updateAndGet {
                 val switchingVideo = (it.cameraMode == CameraMode.VIDEO) != (mode == CameraMode.VIDEO)
                 val switchingPortrait = wasPortrait != enteringPortrait
+                val switchingNight = wasNight != enteringNight
                 it.copy(
                     cameraMode = mode,
-                    isCameraReady = if (switchingVideo || switchingPortrait) false else it.isCameraReady,
+                    isCameraReady = if (switchingVideo || switchingPortrait || switchingNight) false else it.isCameraReady,
                     activeCameraPanel = com.example.model.ActiveCameraPanel.NONE,
                     isFilterSelectorOpen = false,
                     isQuickSettingsOpen = false,
@@ -611,10 +638,15 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
                     portraitSubjectCount = if (enteringPortrait) it.portraitSubjectCount else 0,
                     isPortraitLiveBlurPausedByWatchdog = if (enteringPortrait) it.isPortraitLiveBlurPausedByWatchdog else false,
                     portraitLiveFps = if (enteringPortrait) it.portraitLiveFps else 0f,
-                    portraitPreviewStrategy = if (enteringPortrait) com.example.model.PortraitPreviewStrategy.CHECKING else it.portraitPreviewStrategy
+                    portraitPreviewStrategy = if (enteringPortrait) com.example.model.PortraitPreviewStrategy.CHECKING else it.portraitPreviewStrategy,
+                    isNightExtensionSupported = if (enteringNight) it.isNightExtensionSupported else false,
+                    nightCaptureEngine = if (enteringNight) it.nightCaptureEngine else com.example.model.NightCaptureEngine.MULTI_FRAME_STACK
                 )
             }
             syncImageCaptureFlashMode(state = updatedState)
+            if (enteringNight) {
+                recomputeNightDurationEstimate()
+            }
             if (mode == CameraMode.VIDEO) {
                 _histogramBins.value = emptyList()
             }
@@ -628,6 +660,67 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
 
     fun onPortraitExtensionBindingChanged(isOemBokehActive: Boolean) {
         isOemBokehExtensionActive = isOemBokehActive && (_uiState.value.cameraMode == CameraMode.PORTRAIT)
+    }
+
+    fun setNightExposureMode(mode: com.example.model.NightExposureMode) {
+        if (_uiState.value.isNightCapturing) return
+        preferencesRepo.saveNightExposureMode(mode)
+        _uiState.update { it.copy(nightExposureMode = mode) }
+        recomputeNightDurationEstimate()
+    }
+
+    fun toggleNightExposureMode() {
+        val next = if (_uiState.value.nightExposureMode == com.example.model.NightExposureMode.AUTO) {
+            com.example.model.NightExposureMode.MAX
+        } else {
+            com.example.model.NightExposureMode.AUTO
+        }
+        setNightExposureMode(next)
+    }
+
+    fun onNightBindingChanged(isExtensionActive: Boolean, estimatedLatencyMs: Long?) {
+        val inNight = _uiState.value.cameraMode == CameraMode.NIGHT
+        val activeExt = inNight && isExtensionActive
+        nightExtensionLatencyMs = if (activeExt) estimatedLatencyMs else null
+        val engine = if (activeExt) {
+            com.example.model.NightCaptureEngine.HARDWARE_EXTENSION
+        } else {
+            com.example.model.NightCaptureEngine.MULTI_FRAME_STACK
+        }
+        _uiState.update { cur ->
+            if (cur.isNightExtensionSupported == activeExt && cur.nightCaptureEngine == engine) {
+                cur
+            } else {
+                cur.copy(
+                    isNightExtensionSupported = activeExt,
+                    nightCaptureEngine = engine
+                )
+            }
+        }
+        recomputeNightDurationEstimate()
+    }
+
+    fun onExposureTelemetry(exposureNs: Long, iso: Int) {
+        lastExposureTimeNs = exposureNs
+        lastIso = iso
+        if (_uiState.value.cameraMode == CameraMode.NIGHT && !_uiState.value.isNightCapturing) {
+            recomputeNightDurationEstimate()
+        }
+    }
+
+    private fun recomputeNightDurationEstimate() {
+        val cur = _uiState.value
+        val estimated = nightPipelineManager.estimateCaptureDurationSeconds(
+            exposureMode = cur.nightExposureMode,
+            isExtensionSupported = cur.isNightExtensionSupported,
+            extensionLatencyMs = nightExtensionLatencyMs,
+            isLowLightDetected = cur.isScreenFlashLowLightDetected,
+            lastExposureNs = lastExposureTimeNs,
+            lastIso = lastIso
+        )
+        if (abs(cur.nightEstimatedDurationSeconds - estimated) >= 0.05f) {
+            _uiState.update { it.copy(nightEstimatedDurationSeconds = estimated) }
+        }
     }
 
     fun toggleLens() {
@@ -707,6 +800,9 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
         }
         if (updatedState.isScreenFlashAvailable && updatedState.screenFlashMode == ScreenFlashMode.AUTO) {
             syncImageCaptureFlashMode(state = updatedState)
+        }
+        if (updatedState.cameraMode == CameraMode.NIGHT && !updatedState.isNightCapturing) {
+            recomputeNightDurationEstimate()
         }
     }
 
@@ -926,11 +1022,17 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     private fun dispatchPhotoCapture(mediaCaptureManager: MediaCaptureManager) {
-        if (_uiState.value.isCapturing || _uiState.value.isRecordingVideo) return
+        if (_uiState.value.isCapturing || _uiState.value.isNightCapturing || _uiState.value.isRecordingVideo) return
 
         // Portrait Mode always routes through CameraX still capture + Portrait bokeh pipeline
         if (_uiState.value.cameraMode == CameraMode.PORTRAIT) {
             capturePhoto(mediaCaptureManager)
+            return
+        }
+
+        // Night Mode routes through Hybrid Night Pipeline (ExtensionMode.NIGHT or Multi-Frame Stack)
+        if (_uiState.value.cameraMode == CameraMode.NIGHT) {
+            captureNightPhoto(mediaCaptureManager)
             return
         }
 
@@ -951,6 +1053,266 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
             }
         }
         capturePhoto(mediaCaptureManager)
+    }
+
+    private fun captureNightPhoto(mediaCaptureManager: MediaCaptureManager) {
+        val imageCapture = activeImageCapture
+        if (imageCapture == null) {
+            _uiState.update { it.copy(isCapturing = false, isNightCapturing = false, userMessage = "Camera not ready yet") }
+            return
+        }
+        if (_uiState.value.isCapturing || _uiState.value.isNightCapturing || _uiState.value.isRecordingVideo) return
+
+        val holdSteadyText = appContext.getString(com.example.R.string.night_hold_steady)
+        val processingText = appContext.getString(com.example.R.string.night_processing)
+        val snapshot = _uiState.value
+        val isFront = snapshot.lensFacing == CameraSelector.LENS_FACING_FRONT
+
+        triggerHapticFeedback()
+        syncImageCaptureFlashMode(imageCapture)
+
+        if (snapshot.isNightExtensionSupported) {
+            if (snapshot.isShutterSoundEnabled) {
+                try {
+                    if (mediaSound == null) mediaSound = MediaActionSound()
+                    mediaSound?.play(MediaActionSound.SHUTTER_CLICK)
+                } catch (_: Exception) {}
+            }
+
+            _uiState.update {
+                it.copy(
+                    isCapturing = true,
+                    isNightCapturing = true,
+                    nightCaptureProgress = 0.08f,
+                    nightCaptureStatusText = holdSteadyText
+                )
+            }
+
+            val totalAnimMs = (snapshot.nightEstimatedDurationSeconds * 1000f).toLong().coerceIn(1200L, 6000L)
+            nightCaptureJob?.cancel()
+            nightCaptureJob = viewModelScope.launch {
+                val steps = 20
+                val stepMs = (totalAnimMs / steps).coerceAtLeast(45L)
+                for (i in 1..steps) {
+                    delay(stepMs)
+                    if (!_uiState.value.isNightCapturing) break
+                    val frac = 0.08f + (i.toFloat() / steps.toFloat()) * 0.84f
+                    _uiState.update {
+                        it.copy(
+                            nightCaptureProgress = frac,
+                            nightCaptureStatusText = if (frac >= 0.65f) processingText else holdSteadyText
+                        )
+                    }
+                }
+            }
+
+            var captureStartedCounted = false
+            mediaCaptureManager.capturePhoto(
+                imageCapture = imageCapture,
+                aspectRatio = snapshot.aspectRatio,
+                fullScreenAspectRatio = snapshot.fullScreenAspectRatio,
+                filter = snapshot.selectedFilter,
+                isFrontCamera = isFront,
+                mirrorSelfie = snapshot.isSelfieMirrorEnabled,
+                watermarkConfig = snapshot.watermarkConfig,
+                isSaveLocation = snapshot.isSaveLocationEnabled,
+                activeFocalLengthMm = snapshot.activeFocalLengthMm,
+                privateOriginalStorage = privateOriginalStorage,
+                retainCleanOriginal = snapshot.isPostCaptureWatermarkEditingEnabled,
+                watermarkCacheLimitBytes = snapshot.watermarkCacheLimit.limitBytes,
+                onEvictionNotice = { eviction -> handlePrivateStorageEvictionNotice(eviction) },
+                onCaptureStarted = {
+                    captureStartedCounted = true
+                    _uiState.update {
+                        it.copy(
+                            inFlightCapturesCount = it.inFlightCapturesCount + 1,
+                            isSavingMedia = true,
+                            shutterFlashTrigger = System.currentTimeMillis()
+                        )
+                    }
+                },
+                onShutterReady = {
+                    _uiState.update {
+                        it.copy(
+                            nightCaptureStatusText = processingText,
+                            nightCaptureProgress = maxOf(it.nightCaptureProgress, 0.72f)
+                        )
+                    }
+                },
+                onPhotoSaved = { uri, width, height, bytes ->
+                    nightCaptureJob?.cancel()
+                    dismissScreenFlash()
+                    val cap = capabilityDetector.getCapabilityForLens(isFront)
+                    val actualSize = if (width > 0 && height > 0) {
+                        android.util.Size(width, height)
+                    } else {
+                        _uiState.value.actualConfiguredResolution ?: android.util.Size(0, 0)
+                    }
+                    val actualMp = (actualSize.width.toDouble() * actualSize.height.toDouble()) / 1_000_000.0
+                    if (cap != null) {
+                        capabilityDetector.recordResolutionCapture(
+                            cameraId = cap.cameraId,
+                            lensFacing = if (isFront) "FRONT" else "BACK",
+                            requestedResolution = _uiState.value.photoResolution,
+                            targetDimensions = _uiState.value.targetCaptureSize,
+                            actualDimensions = actualSize,
+                            fileSizeBytes = bytes,
+                            captureEngine = "CameraX ExtensionMode.NIGHT",
+                            isFallback = false
+                        )
+                    }
+                    _uiState.update { cur ->
+                        val remaining = if (captureStartedCounted) maxOf(0, cur.inFlightCapturesCount - 1) else cur.inFlightCapturesCount
+                        cur.copy(
+                            isCapturing = false,
+                            isNightCapturing = false,
+                            nightCaptureProgress = 0f,
+                            nightCaptureStatusText = "",
+                            lastCapturedUri = uri,
+                            inFlightCapturesCount = remaining,
+                            isSavingMedia = remaining > 0
+                        )
+                    }
+                    refreshPrivateStorageStats()
+                    scheduleGalleryRefresh(mediaCaptureManager, actualSize, actualMp)
+                },
+                onError = { exc ->
+                    nightCaptureJob?.cancel()
+                    dismissScreenFlash()
+                    _uiState.update { cur ->
+                        val remaining = if (captureStartedCounted) maxOf(0, cur.inFlightCapturesCount - 1) else cur.inFlightCapturesCount
+                        cur.copy(
+                            isCapturing = false,
+                            isNightCapturing = false,
+                            nightCaptureProgress = 0f,
+                            nightCaptureStatusText = "",
+                            inFlightCapturesCount = remaining,
+                            isSavingMedia = remaining > 0,
+                            userMessage = "Night capture failed: ${exc.localizedMessage ?: "Unknown error"}"
+                        )
+                    }
+                }
+            )
+            return
+        }
+
+        // Fallback: Custom Multi-Frame Burst Stacking Pipeline
+        _uiState.update {
+            it.copy(
+                isCapturing = true,
+                isNightCapturing = true,
+                inFlightCapturesCount = it.inFlightCapturesCount + 1,
+                isSavingMedia = true,
+                nightCaptureProgress = 0.04f,
+                nightCaptureStatusText = holdSteadyText
+            )
+        }
+
+        nightCaptureJob?.cancel()
+        nightCaptureJob = viewModelScope.launch {
+            var countCleared = false
+            try {
+                val saveResult = nightPipelineManager.captureAndStackNightBurst(
+                    imageCapture = imageCapture,
+                    cameraControl = activeCameraControl,
+                    cameraInfo = activeCameraInfo,
+                    exposureMode = snapshot.nightExposureMode,
+                    aspectRatio = snapshot.aspectRatio,
+                    fullScreenAspectRatio = snapshot.fullScreenAspectRatio,
+                    filter = snapshot.selectedFilter,
+                    isFrontCamera = isFront,
+                    mirrorSelfie = snapshot.isSelfieMirrorEnabled,
+                    watermarkConfig = snapshot.watermarkConfig,
+                    isSaveLocation = snapshot.isSaveLocationEnabled,
+                    activeFocalLengthMm = snapshot.activeFocalLengthMm,
+                    privateOriginalStorage = privateOriginalStorage,
+                    retainCleanOriginal = snapshot.isPostCaptureWatermarkEditingEnabled,
+                    watermarkCacheLimitBytes = snapshot.watermarkCacheLimit.limitBytes,
+                    onEvictionNotice = { eviction -> handlePrivateStorageEvictionNotice(eviction) },
+                    onBurstShutterTick = {
+                        if (_uiState.value.isShutterSoundEnabled) {
+                            try {
+                                if (mediaSound == null) mediaSound = MediaActionSound()
+                                mediaSound?.play(MediaActionSound.SHUTTER_CLICK)
+                            } catch (_: Exception) {}
+                        }
+                        _uiState.update { it.copy(shutterFlashTrigger = System.currentTimeMillis()) }
+                    },
+                    onProgress = { progress, isProcessingStage ->
+                        _uiState.update {
+                            it.copy(
+                                nightCaptureProgress = progress.coerceIn(0f, 1f),
+                                nightCaptureStatusText = if (isProcessingStage) processingText else holdSteadyText
+                            )
+                        }
+                    }
+                )
+
+                dismissScreenFlash()
+                val actualSize = android.util.Size(saveResult.width, saveResult.height)
+                val actualMp = (saveResult.width.toDouble() * saveResult.height.toDouble()) / 1_000_000.0
+                val cap = capabilityDetector.getCapabilityForLens(isFront)
+                if (cap != null) {
+                    capabilityDetector.recordResolutionCapture(
+                        cameraId = cap.cameraId,
+                        lensFacing = if (isFront) "FRONT" else "BACK",
+                        requestedResolution = _uiState.value.photoResolution,
+                        targetDimensions = _uiState.value.targetCaptureSize,
+                        actualDimensions = actualSize,
+                        fileSizeBytes = saveResult.sizeBytes,
+                        captureEngine = "Multi-Frame Night Stack (${saveResult.frameCount} frames)",
+                        isFallback = false
+                    )
+                }
+
+                countCleared = true
+                _uiState.update { cur ->
+                    val remaining = maxOf(0, cur.inFlightCapturesCount - 1)
+                    cur.copy(
+                        isCapturing = false,
+                        isNightCapturing = false,
+                        nightCaptureProgress = 0f,
+                        nightCaptureStatusText = "",
+                        lastCapturedUri = saveResult.uri,
+                        inFlightCapturesCount = remaining,
+                        isSavingMedia = remaining > 0
+                    )
+                }
+                refreshPrivateStorageStats()
+                scheduleGalleryRefresh(mediaCaptureManager, actualSize, actualMp)
+            } catch (ce: kotlinx.coroutines.CancellationException) {
+                throw ce
+            } catch (t: Throwable) {
+                dismissScreenFlash()
+                countCleared = true
+                _uiState.update { cur ->
+                    val remaining = maxOf(0, cur.inFlightCapturesCount - 1)
+                    cur.copy(
+                        isCapturing = false,
+                        isNightCapturing = false,
+                        nightCaptureProgress = 0f,
+                        nightCaptureStatusText = "",
+                        inFlightCapturesCount = remaining,
+                        isSavingMedia = remaining > 0,
+                        userMessage = "Night capture failed: ${t.localizedMessage ?: "Unknown error"}"
+                    )
+                }
+            } finally {
+                if (!countCleared) {
+                    _uiState.update { cur ->
+                        val remaining = maxOf(0, cur.inFlightCapturesCount - 1)
+                        cur.copy(
+                            isCapturing = false,
+                            isNightCapturing = false,
+                            nightCaptureProgress = 0f,
+                            nightCaptureStatusText = "",
+                            inFlightCapturesCount = remaining,
+                            isSavingMedia = remaining > 0
+                        )
+                    }
+                }
+            }
+        }
     }
 
     private fun captureUltraHighResolutionPhoto(
@@ -2799,7 +3161,9 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     fun cycleRawModeFromTopBar() {
-        if (_uiState.value.cameraMode == CameraMode.PORTRAIT) {
+        if (_uiState.value.cameraMode == CameraMode.PORTRAIT ||
+            _uiState.value.cameraMode == CameraMode.NIGHT
+        ) {
             return
         }
         if (!_uiState.value.isRawSupportedOnCurrentLens) {
@@ -3202,6 +3566,7 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
         recordingTimerJob?.cancel()
         countdownJob?.cancel()
         galleryRefreshJob?.cancel()
+        nightCaptureJob?.cancel()
         if (_uiState.value.isRecordingVideo || activeRecording != null) {
             try {
                 if (isRecordingStarted) {
@@ -3219,6 +3584,7 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
         mediaSound = null
         cleanupEditorWatermarkTempFiles()
         portraitPipelineManager.onExitPortraitMode()
+        nightPipelineManager.shutdown()
         mediaCaptureManager.shutdown()
         ultraResCaptureManager.shutdown()
     }
