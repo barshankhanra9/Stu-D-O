@@ -857,6 +857,42 @@ enum class ProControlTab {
     WB
 }
 
+enum class FocusPeakingColor(
+    val displayName: String,
+    val color: Color,
+    val argb: Int
+) {
+    CYAN("Cyan", Color(0xFF22D3EE), 0xFF22D3EE.toInt()),
+    GOLD("Gold", Color(0xFFFACC15), 0xFFFACC15.toInt()),
+    RED("Red", Color(0xFFFF3B30), 0xFFFF3B30.toInt())
+}
+
+enum class FocusPeakingSensitivity(
+    val displayName: String,
+    val shortLabel: String,
+    val gradientThreshold: Int
+) {
+    LOW("Low", "Low", 200),
+    MEDIUM("Medium", "Med", 135),
+    HIGH("High", "High", 85)
+}
+
+enum class ZebraThreshold(
+    val displayName: String,
+    val ireLabel: String,
+    val lumaThreshold: Int
+) {
+    IRE_90("90%", "90% IRE", 230),
+    IRE_95("95%", "95% IRE", 242),
+    IRE_100("100%", "100% IRE", 250)
+}
+
+enum class ProAssistPopover {
+    NONE,
+    FOCUS_PEAKING,
+    ZEBRA
+}
+
 enum class ProWhitebalanceMode(val displayName: String, val camera2Mode: Int, val kelvinText: String) {
     AUTO("Auto", 1, "Auto"),
     DAYLIGHT("Daylight", 5, "5500K"),
@@ -1036,10 +1072,16 @@ data class CameraUiState(
     val oemEnhancementMode: OemEnhancementMode = OemEnhancementMode.AUTOMATIC,
     val activeOemAdapterName: String = "Universal Android Engine",
     val oemEnhancementSummary: String = "Universal Mode Active",
-    // Pro Mode Manual Controls
+    // Pro Mode Manual Controls & Visual Assists
     val proSettings: ProCameraSettings = ProCameraSettings(),
     val proCapabilities: ProCameraCapabilities = ProCameraCapabilities(),
     val activeProTab: ProControlTab = ProControlTab.NONE,
+    val isFocusPeakingEnabled: Boolean = false,
+    val focusPeakingColor: FocusPeakingColor = FocusPeakingColor.CYAN,
+    val focusPeakingSensitivity: FocusPeakingSensitivity = FocusPeakingSensitivity.MEDIUM,
+    val isZebraStripesEnabled: Boolean = false,
+    val zebraThreshold: ZebraThreshold = ZebraThreshold.IRE_95,
+    val activeProAssistPopover: ProAssistPopover = ProAssistPopover.NONE,
     // Watermark Studio
     val isWatermarkStudioOpen: Boolean = false,
     val watermarkPresets: List<WatermarkPreset> = emptyList(),
@@ -1099,6 +1141,12 @@ data class CameraUiState(
                 String.format(java.util.Locale.US, "~%.1fs", roundedHalf)
             }
         }
+
+    val isProFocusPeakingOverlayVisible: Boolean
+        get() = cameraMode == CameraMode.PRO && isFocusPeakingEnabled
+
+    val isProZebraOverlayVisible: Boolean
+        get() = cameraMode == CameraMode.PRO && isZebraStripesEnabled
 }
 
 enum class OemEnhancementMode(val displayName: String, val shortLabel: String, val description: String) {

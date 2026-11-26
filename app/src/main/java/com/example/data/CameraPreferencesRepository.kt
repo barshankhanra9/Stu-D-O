@@ -64,6 +64,9 @@ class CameraPreferencesRepository(context: Context) {
         private const val KEY_SAVE_LOCATION = "pref_save_location"
         private const val KEY_PORTRAIT_BLUR_INTENSITY = "pref_portrait_blur_intensity"
         private const val KEY_NIGHT_EXPOSURE_MODE = "pref_night_exposure_mode"
+        private const val KEY_PRO_PEAKING_COLOR = "pref_pro_peaking_color"
+        private const val KEY_PRO_PEAKING_SENSITIVITY = "pref_pro_peaking_sensitivity"
+        private const val KEY_PRO_ZEBRA_THRESHOLD = "pref_pro_zebra_threshold"
 
         fun watermarkConfigToJson(config: WatermarkConfig): JSONObject {
             return JSONObject().apply {
@@ -644,5 +647,46 @@ class CameraPreferencesRepository(context: Context) {
 
     fun saveNightExposureMode(mode: com.example.model.NightExposureMode) {
         prefs.edit().putString(KEY_NIGHT_EXPOSURE_MODE, mode.name).apply()
+    }
+
+    // Pro Mode Focus Peaking Color & Sensitivity
+    fun getFocusPeakingColor(): com.example.model.FocusPeakingColor {
+        val name = prefs.getString(KEY_PRO_PEAKING_COLOR, com.example.model.FocusPeakingColor.CYAN.name)
+        return try {
+            com.example.model.FocusPeakingColor.valueOf(name ?: com.example.model.FocusPeakingColor.CYAN.name)
+        } catch (_: Exception) {
+            com.example.model.FocusPeakingColor.CYAN
+        }
+    }
+
+    fun saveFocusPeakingColor(color: com.example.model.FocusPeakingColor) {
+        prefs.edit().putString(KEY_PRO_PEAKING_COLOR, color.name).apply()
+    }
+
+    fun getFocusPeakingSensitivity(): com.example.model.FocusPeakingSensitivity {
+        val name = prefs.getString(KEY_PRO_PEAKING_SENSITIVITY, com.example.model.FocusPeakingSensitivity.MEDIUM.name)
+        return try {
+            com.example.model.FocusPeakingSensitivity.valueOf(name ?: com.example.model.FocusPeakingSensitivity.MEDIUM.name)
+        } catch (_: Exception) {
+            com.example.model.FocusPeakingSensitivity.MEDIUM
+        }
+    }
+
+    fun saveFocusPeakingSensitivity(sensitivity: com.example.model.FocusPeakingSensitivity) {
+        prefs.edit().putString(KEY_PRO_PEAKING_SENSITIVITY, sensitivity.name).apply()
+    }
+
+    // Pro Mode Zebra Exposure Warning Threshold
+    fun getZebraThreshold(): com.example.model.ZebraThreshold {
+        val name = prefs.getString(KEY_PRO_ZEBRA_THRESHOLD, com.example.model.ZebraThreshold.IRE_95.name)
+        return try {
+            com.example.model.ZebraThreshold.valueOf(name ?: com.example.model.ZebraThreshold.IRE_95.name)
+        } catch (_: Exception) {
+            com.example.model.ZebraThreshold.IRE_95
+        }
+    }
+
+    fun saveZebraThreshold(threshold: com.example.model.ZebraThreshold) {
+        prefs.edit().putString(KEY_PRO_ZEBRA_THRESHOLD, threshold.name).apply()
     }
 }

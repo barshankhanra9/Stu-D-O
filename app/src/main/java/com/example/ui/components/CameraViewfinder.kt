@@ -108,6 +108,7 @@ import kotlinx.coroutines.withTimeoutOrNull
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicReference
 import kotlin.coroutines.resume
 import kotlin.coroutines.resumeWithException
@@ -157,6 +158,11 @@ private class ViewfinderSessionHolder {
     val isFrontCamera = AtomicBoolean(false)
     val isGestureBlocked = AtomicBoolean(false)
     val isScreenFlashOverlayActive = AtomicBoolean(false)
+    val isProPeakingActive = AtomicBoolean(false)
+    val isProZebraActive = AtomicBoolean(false)
+    val proPeakingColorArgb = AtomicInteger(com.example.model.FocusPeakingColor.CYAN.argb)
+    val proPeakingThreshold = AtomicInteger(com.example.model.FocusPeakingSensitivity.MEDIUM.gradientThreshold)
+    val proZebraLumaThreshold = AtomicInteger(com.example.model.ZebraThreshold.IRE_95.lumaThreshold)
     var isSurfaceProviderAttached: Boolean = false
 
     fun currentlyBoundUseCases(): List<androidx.camera.core.UseCase> {
@@ -327,6 +333,8 @@ fun CameraViewfinder(
     onNightBindingChanged: (Boolean, Long?) -> Unit = { _, _ -> },
     onExposureTelemetry: ((Long, Int) -> Unit)? = null,
     orientationState: kotlinx.coroutines.flow.StateFlow<com.example.model.DeviceOrientationState>? = null,
+    proAssistFrameState: kotlinx.coroutines.flow.StateFlow<com.example.util.ProAssistOverlayFrame?>? = null,
+    onProAssistFrame: (com.example.util.ProAssistOverlayFrame?) -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     val context = LocalContext.current
@@ -357,6 +365,7 @@ fun CameraViewfinder(
     val latestNightPipelineManager by rememberUpdatedState(nightPipelineManager)
     val latestOnNightBindingChanged by rememberUpdatedState(onNightBindingChanged)
     val latestOnExposureTelemetry by rememberUpdatedState(onExposureTelemetry)
+    val latestOnProAssistFrame by rememberUpdatedState(onProAssistFrame)
 
     val isOverlayBlocking = uiState.isSettingsOpen ||
         uiState.isWatermarkStudioOpen ||
@@ -383,6 +392,15 @@ fun CameraViewfinder(
     val isGlPortraitBlurVisible = isPortraitWanted &&
         uiState.portraitPreviewStrategy == PortraitPreviewStrategy.UNIVERSAL_GL_SHADER &&
         !uiState.isPortraitLiveBlurPausedByWatchdog
+    val isProPeakingWanted = !isVideoMode &&
+        uiState.cameraMode == CameraMode.PRO &&
+        uiState.isFocusPeakingEnabled &&
+        !shouldPausePreview
+    val isProZebraWanted = !isVideoMode &&
+        uiState.cameraMode == CameraMode.PRO &&
+        uiState.isZebraStripesEnabled &&
+        !shouldPausePreview
+    val isProAssistWanted = isProPeakingWanted || isProZebraWanted
 
     LaunchedEffect(isFramedBackdropWanted) {
         if (!isFramedBackdropWanted) {
@@ -390,15 +408,26 @@ fun CameraViewfinder(
         }
     }
 
+    LaunchedEffect(isProAssistWanted) {
+        if (!isProAssistWanted) {
+            latestOnProAssistFrame(null)
+        }
+    }
+
     SideEffect {
         session.isAnalysisPaused.set(
             shouldPausePreview ||
-                (!uiState.isHistogramEnabled && !isFramedBackdropWanted && !isPortraitWanted) ||
+                (!uiState.isHistogramEnabled && !isFramedBackdropWanted && !isPortraitWanted && !isProAssistWanted) ||
                 isVideoMode
         )
         session.isHistogramActive.set(!shouldPausePreview && uiState.isHistogramEnabled && !isVideoMode)
         session.isBackdropActive.set(isFramedBackdropWanted)
         session.isPortraitActive.set(isPortraitWanted)
+        session.isProPeakingActive.set(isProPeakingWanted)
+        session.isProZebraActive.set(isProZebraWanted)
+        session.proPeakingColorArgb.set(uiState.focusPeakingColor.argb)
+        session.proPeakingThreshold.set(uiState.focusPeakingSensitivity.gradientThreshold)
+        session.proZebraLumaThreshold.set(uiState.zebraThreshold.lumaThreshold)
         session.portraitBlurIntensity.set(uiState.portraitBlurIntensity)
         session.portraitFocusX.set(uiState.portraitFocusPointNormalized?.x)
         session.portraitFocusY.set(uiState.portraitFocusPointNormalized?.y)
@@ -807,6 +836,15 @@ fun CameraViewfinder(
                     FilterAtmosphereOverlay(filter = uiState.selectedFilter)
                 }
 
+                // Real-time Pro Mode Focus Peaking & Zebra Stripes overlay (aligned to PreviewView FILL_CENTER)
+                if (proAssistFrameState != null && (isProPeakingWanted || isProZebraWanted)) {
+                    ProAssistOverlay(
+                        frameState = proAssistFrameState,
+                        isPeakingVisible = isProPeakingWanted,
+                        isZebraVisible = isProZebraWanted
+                    )
+                }
+
                 // Framing Grid overlay
                 CameraGridView(gridOption = uiState.selectedGrid)
 
@@ -914,6 +952,7 @@ fun CameraViewfinder(
             isAnalysisNeeded = !isVideoMode && (
                 uiState.isHistogramEnabled ||
                     uiState.cameraMode == CameraMode.PORTRAIT ||
+                    isProAssistWanted ||
                     (activeAspectRatio != CaptureAspectRatio.RATIO_FULL && !isLowRamDevice)
                 )
         )
@@ -1392,7 +1431,8 @@ fun CameraViewfinder(
                                         aspectRatio = targetBindingRequest.core.aspectRatio,
                                         onHistogramData = { bins -> latestOnHistogramData(bins) },
                                         onHistogramSampled = { data -> latestOnHistogramSampled(data) },
-                                        onBackdropBitmap = { bmp -> blurredBackdropBitmap = bmp }
+                                        onBackdropBitmap = { bmp -> blurredBackdropBitmap = bmp },
+                                        onProAssistFrame = { frame -> latestOnProAssistFrame(frame) }
                                     )
                                     session.analysisExecutor = exec
                                     session.boundImageAnalysis = analysis
@@ -1444,7 +1484,8 @@ fun CameraViewfinder(
                                 aspectRatio = targetBindingRequest.core.aspectRatio,
                                 onHistogramData = { bins -> latestOnHistogramData(bins) },
                                 onHistogramSampled = { data -> latestOnHistogramSampled(data) },
-                                onBackdropBitmap = { bmp -> blurredBackdropBitmap = bmp }
+                                onBackdropBitmap = { bmp -> blurredBackdropBitmap = bmp },
+                                onProAssistFrame = { frame -> latestOnProAssistFrame(frame) }
                             )
                             session.analysisExecutor = exec
                             session.boundImageAnalysis = analysis
@@ -2420,7 +2461,8 @@ private fun buildCombinedImageAnalysis(
     aspectRatio: CaptureAspectRatio,
     onHistogramData: (List<Float>) -> Unit,
     onHistogramSampled: (com.example.model.HistogramData) -> Unit,
-    onBackdropBitmap: (Bitmap) -> Unit
+    onBackdropBitmap: (Bitmap) -> Unit,
+    onProAssistFrame: (com.example.util.ProAssistOverlayFrame?) -> Unit = {}
 ): Pair<ImageAnalysis, ExecutorService> {
     val exec = Executors.newSingleThreadExecutor()
     val is16_9 = (aspectRatio == CaptureAspectRatio.RATIO_16_9 || aspectRatio == CaptureAspectRatio.RATIO_FULL)
@@ -2445,14 +2487,19 @@ private fun buildCombinedImageAnalysis(
         .build()
     var lastHistogramNs = 0L
     var lastBackdropNs = 0L
+    var lastProAssistNs = 0L
     val histogramScratch = com.example.util.HistogramSampler.ScratchBuffers()
     val backdropPixels = IntArray(36 * 48)
+    val proAssistAnalyzer = com.example.util.ProAssistAnalyzer()
     analysis.setAnalyzer(exec) { imageProxy ->
         try {
             if (!session.isDisposed.get() && !session.isAnalysisPaused.get()) {
                 val nowNs = System.nanoTime()
                 val wantHistogram = session.isHistogramActive.get() && (nowNs - lastHistogramNs >= 66_000_000L)
                 val wantBackdrop = session.isBackdropActive.get() && (nowNs - lastBackdropNs >= 260_000_000L)
+                val wantPeaking = session.isProPeakingActive.get()
+                val wantZebra = session.isProZebraActive.get()
+                val wantProAssist = (wantPeaking || wantZebra) && (nowNs - lastProAssistNs >= 33_000_000L)
 
                 if (wantHistogram) {
                     lastHistogramNs = nowNs
@@ -2462,6 +2509,26 @@ private fun buildCombinedImageAnalysis(
                 if (wantBackdrop) {
                     lastBackdropNs = nowNs
                     extractLiveBackdrop(imageProxy, backdropPixels, mainExecutor, session, onBackdropBitmap)
+                }
+
+                if (wantProAssist) {
+                    lastProAssistNs = nowNs
+                    val frame = proAssistAnalyzer.analyzeImageProxy(
+                        imageProxy = imageProxy,
+                        isFrontCamera = session.isFrontCamera.get(),
+                        enablePeaking = wantPeaking,
+                        peakingColorArgb = session.proPeakingColorArgb.get(),
+                        peakingThreshold = session.proPeakingThreshold.get(),
+                        enableZebra = wantZebra,
+                        zebraLumaThreshold = session.proZebraLumaThreshold.get()
+                    )
+                    mainExecutor.execute {
+                        if (!session.isDisposed.get() &&
+                            (session.isProPeakingActive.get() || session.isProZebraActive.get())
+                        ) {
+                            onProAssistFrame(frame)
+                        }
+                    }
                 }
             }
         } catch (_: Throwable) {

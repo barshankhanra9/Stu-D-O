@@ -53,4 +53,16 @@
     <string name="histogram_highlight_clip_cd">Highlight clipping indicator</string>
     <string name="histogram_collapsed_cd">Compact live histogram, double tap to expand</string>
     <string name="histogram_expanded_cd">Live histogram, drag to reposition or double tap to collapse</string>
+    <string name="pro_assist_peak">PEAK</string>
+    <string name="pro_assist_zebra">ZEBRA</string>
+    <string name="pro_assist_peak_toggle_cd">Focus Peaking %1$s, tap to toggle, long press for options</string>
+    <string name="pro_assist_peak_settings_cd">Focus Peaking settings</string>
+    <string name="pro_assist_zebra_toggle_cd">Zebra Stripes %1$s, tap to toggle, long press for options</string>
+    <string name="pro_assist_zebra_settings_cd">Zebra Stripes settings</string>
+    <string name="pro_assist_peak_title">FOCUS PEAKING</string>
+    <string name="pro_assist_peak_color">COLOR</string>
+    <string name="pro_assist_peak_sensitivity">SENSITIVITY</string>
+    <string name="pro_assist_zebra_title">ZEBRA EXPOSURE WARNING</string>
+    <string name="pro_assist_zebra_threshold">THRESHOLD (IRE)</string>
+    <string name="pro_assist_overlay_cd">Pro visual assist overlay</string>
 </resources>

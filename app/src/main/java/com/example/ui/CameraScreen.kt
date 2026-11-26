@@ -571,11 +571,18 @@ fun CameraScreen(
                     viewModel.onExposureTelemetry(exposureNs, iso)
                 }
             }
+            val onProAssistFrame = remember(viewModel) {
+                { frame: com.example.util.ProAssistOverlayFrame? ->
+                    viewModel.updateProAssistFrame(frame)
+                }
+            }
 
             // Live Viewfinder (CameraX Preview + Gestures + Framing Grid + Level + Filters + Portrait Live Bokeh)
             CameraViewfinder(
                 uiState = uiState,
                 orientationState = viewModel.orientationState,
+                proAssistFrameState = viewModel.proAssistFrame,
+                onProAssistFrame = onProAssistFrame,
                 onCameraBound = onCameraBound,
                 onStreamStateChanged = onStreamStateChanged,
                 onPinchZoom = onPinchZoom,
@@ -635,7 +642,8 @@ fun CameraScreen(
 
                 // Outside-tap scrim: dismissing any open top drawer/panel or Pro slider without triggering tap-to-focus
                 if (uiState.activeCameraPanel != ActiveCameraPanel.NONE ||
-                    uiState.activeProTab != ProControlTab.NONE
+                    uiState.activeProTab != ProControlTab.NONE ||
+                    uiState.activeProAssistPopover != com.example.model.ProAssistPopover.NONE
                 ) {
                     Box(
                         modifier = Modifier
@@ -776,7 +784,7 @@ fun CameraScreen(
                     )
                 }
 
-                // Pro Mode Manual Controls Dock (ISO, Shutter, EV, Focus, White Balance)
+                // Pro Mode Manual Controls Dock (ISO, Shutter, EV, Focus, White Balance + PEAK / ZEBRA Assist)
                 AnimatedVisibility(
                     visible = uiState.cameraMode == CameraMode.PRO,
                     enter = slideInVertically { it } + fadeIn(),
@@ -793,7 +801,13 @@ fun CameraScreen(
                         onEvChanged = { viewModel.setProEv(it) },
                         onFocusChanged = { dist, isManual -> viewModel.setProFocus(dist, isManual) },
                         onWhiteBalanceChanged = { viewModel.setProWhiteBalance(it) },
-                        onResetAll = { viewModel.resetProSettings() }
+                        onResetAll = { viewModel.resetProSettings() },
+                        onToggleFocusPeaking = { viewModel.toggleFocusPeaking() },
+                        onToggleZebraStripes = { viewModel.toggleZebraStripes() },
+                        onSelectAssistPopover = { viewModel.setActiveProAssistPopover(it) },
+                        onFocusPeakingColorChanged = { viewModel.setFocusPeakingColor(it) },
+                        onFocusPeakingSensitivityChanged = { viewModel.setFocusPeakingSensitivity(it) },
+                        onZebraThresholdChanged = { viewModel.setZebraThreshold(it) }
                     )
                 }
 

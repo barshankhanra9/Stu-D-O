@@ -101,6 +101,9 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
     private val _histogramData = MutableStateFlow(com.example.model.HistogramData.Empty)
     val histogramData: StateFlow<com.example.model.HistogramData> = _histogramData.asStateFlow()
 
+    private val _proAssistFrame = MutableStateFlow<com.example.util.ProAssistOverlayFrame?>(null)
+    val proAssistFrame: StateFlow<com.example.util.ProAssistOverlayFrame?> = _proAssistFrame.asStateFlow()
+
     private var activeCamera: Camera? = null
     private var activeCameraControl: CameraControl? = null
     private var activeCameraInfo: CameraInfo? = null
@@ -201,7 +204,10 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
                 portraitBlurIntensity = preferencesRepo.getPortraitBlurIntensity(),
                 portraitQualityTier = initialPortraitTier,
                 nightExposureMode = savedNightMode,
-                nightEstimatedDurationSeconds = initialNightDuration
+                nightEstimatedDurationSeconds = initialNightDuration,
+                focusPeakingColor = preferencesRepo.getFocusPeakingColor(),
+                focusPeakingSensitivity = preferencesRepo.getFocusPeakingSensitivity(),
+                zebraThreshold = preferencesRepo.getZebraThreshold()
             )
         }
         refreshLensCapabilities()
@@ -636,6 +642,9 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
                     isQuickSettingsOpen = false,
                     isVideoSettingsPanelOpen = false,
                     activeProTab = com.example.model.ProControlTab.NONE,
+                    activeProAssistPopover = com.example.model.ProAssistPopover.NONE,
+                    isFocusPeakingEnabled = if (mode == CameraMode.PRO) it.isFocusPeakingEnabled else false,
+                    isZebraStripesEnabled = if (mode == CameraMode.PRO) it.isZebraStripesEnabled else false,
                     showExposureSlider = false,
                     isVideoRecordingSupported = if (mode == CameraMode.VIDEO) videoSupportedForLens else it.isVideoRecordingSupported,
                     isPortraitSubjectDetected = if (enteringPortrait) it.isPortraitSubjectDetected else false,
@@ -654,6 +663,9 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
             if (mode == CameraMode.VIDEO) {
                 _histogramBins.value = emptyList()
                 _histogramData.value = com.example.model.HistogramData.Empty
+            }
+            if (mode != CameraMode.PRO) {
+                _proAssistFrame.value = null
             }
             if (mode == CameraMode.PRO) {
                 applyProSettingsToPreview()
@@ -969,7 +981,8 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
                 isFilterSelectorOpen = if (opening) false else it.isFilterSelectorOpen,
                 isQuickSettingsOpen = if (opening) false else it.isQuickSettingsOpen,
                 isVideoSettingsPanelOpen = if (opening) false else it.isVideoSettingsPanelOpen,
-                activeProTab = if (opening) com.example.model.ProControlTab.NONE else it.activeProTab
+                activeProTab = if (opening) com.example.model.ProControlTab.NONE else it.activeProTab,
+                activeProAssistPopover = if (opening) com.example.model.ProAssistPopover.NONE else it.activeProAssistPopover
             )
         }
     }
@@ -2271,6 +2284,9 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
                 activeProTab = if (target != com.example.model.ActiveCameraPanel.NONE) {
                     com.example.model.ProControlTab.NONE
                 } else current.activeProTab,
+                activeProAssistPopover = if (target != com.example.model.ActiveCameraPanel.NONE) {
+                    com.example.model.ProAssistPopover.NONE
+                } else current.activeProAssistPopover,
                 showExposureSlider = if (target != com.example.model.ActiveCameraPanel.NONE) {
                     false
                 } else current.showExposureSlider
@@ -2285,6 +2301,7 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
                 !current.isQuickSettingsOpen &&
                 !current.isVideoSettingsPanelOpen &&
                 current.activeProTab == com.example.model.ProControlTab.NONE &&
+                current.activeProAssistPopover == com.example.model.ProAssistPopover.NONE &&
                 !current.showExposureSlider
             ) {
                 current
@@ -2295,6 +2312,7 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
                     isQuickSettingsOpen = false,
                     isVideoSettingsPanelOpen = false,
                     activeProTab = com.example.model.ProControlTab.NONE,
+                    activeProAssistPopover = com.example.model.ProAssistPopover.NONE,
                     showExposureSlider = false
                 )
             }
@@ -3217,12 +3235,70 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
             val opening = nextTab != com.example.model.ProControlTab.NONE
             current.copy(
                 activeProTab = nextTab,
+                activeProAssistPopover = if (opening) com.example.model.ProAssistPopover.NONE else current.activeProAssistPopover,
                 activeCameraPanel = if (opening) com.example.model.ActiveCameraPanel.NONE else current.activeCameraPanel,
                 isFilterSelectorOpen = if (opening) false else current.isFilterSelectorOpen,
                 isQuickSettingsOpen = if (opening) false else current.isQuickSettingsOpen,
                 isVideoSettingsPanelOpen = if (opening) false else current.isVideoSettingsPanelOpen
             )
         }
+    }
+
+    fun toggleFocusPeaking() {
+        val updated = _uiState.updateAndGet { current ->
+            val nextEnabled = !current.isFocusPeakingEnabled
+            current.copy(isFocusPeakingEnabled = nextEnabled)
+        }
+        if (!updated.isProFocusPeakingOverlayVisible && !updated.isProZebraOverlayVisible) {
+            _proAssistFrame.value = null
+        }
+    }
+
+    fun toggleZebraStripes() {
+        val updated = _uiState.updateAndGet { current ->
+            val nextEnabled = !current.isZebraStripesEnabled
+            current.copy(isZebraStripesEnabled = nextEnabled)
+        }
+        if (!updated.isProFocusPeakingOverlayVisible && !updated.isProZebraOverlayVisible) {
+            _proAssistFrame.value = null
+        }
+    }
+
+    fun setActiveProAssistPopover(popover: com.example.model.ProAssistPopover) {
+        _uiState.update { current ->
+            val nextPopover = if (current.activeProAssistPopover == popover) {
+                com.example.model.ProAssistPopover.NONE
+            } else {
+                popover
+            }
+            val opening = nextPopover != com.example.model.ProAssistPopover.NONE
+            current.copy(
+                activeProAssistPopover = nextPopover,
+                activeCameraPanel = if (opening) com.example.model.ActiveCameraPanel.NONE else current.activeCameraPanel,
+                isFilterSelectorOpen = if (opening) false else current.isFilterSelectorOpen,
+                isQuickSettingsOpen = if (opening) false else current.isQuickSettingsOpen,
+                isVideoSettingsPanelOpen = if (opening) false else current.isVideoSettingsPanelOpen
+            )
+        }
+    }
+
+    fun setFocusPeakingColor(color: com.example.model.FocusPeakingColor) {
+        preferencesRepo.saveFocusPeakingColor(color)
+        _uiState.update { it.copy(focusPeakingColor = color) }
+    }
+
+    fun setFocusPeakingSensitivity(sensitivity: com.example.model.FocusPeakingSensitivity) {
+        preferencesRepo.saveFocusPeakingSensitivity(sensitivity)
+        _uiState.update { it.copy(focusPeakingSensitivity = sensitivity) }
+    }
+
+    fun setZebraThreshold(threshold: com.example.model.ZebraThreshold) {
+        preferencesRepo.saveZebraThreshold(threshold)
+        _uiState.update { it.copy(zebraThreshold = threshold) }
+    }
+
+    fun updateProAssistFrame(frame: com.example.util.ProAssistOverlayFrame?) {
+        _proAssistFrame.value = frame
     }
 
     fun setProIso(iso: Int?) {
@@ -3267,7 +3343,8 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
         _uiState.update { current ->
             current.copy(
                 proSettings = com.example.model.ProCameraSettings(),
-                activeProTab = com.example.model.ProControlTab.NONE
+                activeProTab = com.example.model.ProControlTab.NONE,
+                activeProAssistPopover = com.example.model.ProAssistPopover.NONE
             )
         }
         clearProSettingsFromPreview()
